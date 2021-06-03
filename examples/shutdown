@@ -1,0 +1,9 @@
+type = process
+load-options = sub-vars
+command = rosrun cdinit ctl.sh shutdown
+
+# our default timeout is 20
+stop-timeout = 25.0
+
+# let it output to console
+options = shares-console
