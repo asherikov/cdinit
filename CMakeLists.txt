@@ -119,7 +119,7 @@ install(TARGETS dinit dinitctl dinitcheck
     RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-foreach(DIR examples scripts)
+foreach(DIR dinit_services scripts)
     install(DIRECTORY ${DIR}
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
         USE_SOURCE_PERMISSIONS
