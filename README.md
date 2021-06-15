@@ -12,6 +12,13 @@ environment.
 
 
 
+Examples
+========
+
+* `env CDINIT_TIMEOUT=17 rosrun cdinit launch.sh roscore timeout`
+
+
+
 Terminology
 ===========
 
