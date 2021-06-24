@@ -1,2 +1,0 @@
-type = process
-command = ./record-param.sh part3

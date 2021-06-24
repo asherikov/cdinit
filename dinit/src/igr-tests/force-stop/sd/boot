@@ -1,3 +1,0 @@
-type = internal
-depends-on = critical
-depends-on = intermediary

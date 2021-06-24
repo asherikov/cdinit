@@ -1,3 +1,0 @@
-type = internal
-depends-on = b
-depends-on = c

@@ -1,7 +1,0 @@
-type = bgprocess
-smooth-recovery = true
-command = /usr/libexec/syslogd
-pid-file = /var/run/syslog.pid
-options = starts-log
-
-depends-on = rcboot

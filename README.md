@@ -15,8 +15,8 @@ environment.
 Examples
 ========
 
-* `env CDINIT_TIMEOUT=17 rosrun cdinit launch.sh roscore timeout`
-
+* `rosrun cdinit launch.sh roscore timeout CDINIT_TIMEOUT=17` -- runs `roscore`
+  and `timeout` services and sets `CDINIT_TIMEOUT` environment variable.
 
 
 Terminology
