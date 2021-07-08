@@ -31,7 +31,7 @@ void service_dir_opt::build_paths(bool am_system_init)
         bool home_service_dir_set = false;
 
         /* service directory name */
-        if (not am_system_init) {
+        if (! am_system_init) {
             const char * user_home = get_user_home();
             if (user_home != nullptr) {
                 size_t user_home_len = strlen(user_home);
@@ -47,7 +47,7 @@ void service_dir_opt::build_paths(bool am_system_init)
             }
         }
 
-        if (not home_service_dir_set) {
+        if (! home_service_dir_set) {
             service_dir_paths.add_dir("/etc/dinit.d", /*dyn_allocd=*/false);
             service_dir_paths.add_dir("/usr/local/lib/dinit.d", false);
             service_dir_paths.add_dir("/lib/dinit.d", false);
