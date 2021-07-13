@@ -16,7 +16,9 @@ Examples
 ========
 
 * `rosrun cdinit launch.sh roscore timeout CDINIT_TIMEOUT=17` -- runs `roscore`
-  and `timeout` services and sets `CDINIT_TIMEOUT` environment variable.
+  and `timeout` services (see `dinit_services` directory) and sets
+  `CDINIT_TIMEOUT` environment variable used by `timeout` service.
+* `rosrun cdinit ctl.sh ...` can be used to list/control services.
 
 
 Terminology
