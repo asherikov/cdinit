@@ -18,9 +18,11 @@
 #include "cpbuffer.h"
 #include "control-cmds.h"
 #include "service-constants.h"
+#include "static-string.h"
 #include "dinit-client.h"
 #include "dinit-util.h"
 #include "mconfig.h"
+#include "control-datatypes.h"
 
 #include "dasynq.h"
 
@@ -28,7 +30,10 @@
 // This utility communicates with the dinit daemon via a unix socket (specified in SYSCONTROLSOCKET).
 
 static constexpr uint16_t min_cp_version = 1;
-static constexpr uint16_t max_cp_version = 1;
+static constexpr uint16_t max_cp_version = 5;
+
+static constexpr auto reboot_execname = cts::literal(SHUTDOWN_PREFIX) + cts::literal("reboot");
+static constexpr auto soft_reboot_execname = cts::literal(SHUTDOWN_PREFIX) + cts::literal("soft-reboot");
 
 using loop_t = dasynq::event_loop_n;
 using rearm = dasynq::rearm;
@@ -38,6 +43,8 @@ class subproc_buffer;
 void do_system_shutdown(shutdown_type_t shutdown_type);
 static void unmount_disks(loop_t &loop, subproc_buffer &sub_buf);
 static void swap_off(loop_t &loop, subproc_buffer &sub_buf);
+static loop_t::child_proc_watcher::proc_status_t run_process(const char * prog_args[],
+        loop_t &loop, subproc_buffer &sub_buf);
 
 constexpr static int subproc_bufsize = 4096;
 
@@ -111,7 +118,7 @@ class subproc_buffer : private cpbuffer<subproc_bufsize>
     void append(const char *msg)
     {
         out_watch->set_enabled(loop, true);
-        int len = strlen(msg);
+        unsigned len = strlen(msg);
         if (subproc_bufsize - get_length() >= len) {
             base::append(msg, len);
         }
@@ -239,6 +246,27 @@ class subproc_buffer : private cpbuffer<subproc_bufsize>
     }
 };
 
+static bool reboot_cmd_unsupported(const shutdown_type_t type)
+{
+    // weed out unsupported values
+    switch (type) {
+#if !defined(RB_HALT_SYSTEM) && !defined(RB_HALT)
+    case shutdown_type_t::HALT:
+        return true;
+#endif
+#ifndef RB_POWER_OFF
+    case shutdown_type_t::POWEROFF:
+        return true;
+#endif
+#ifndef RB_KEXEC
+    case shutdown_type_t::KEXEC:
+        return true;
+#endif
+    default:
+        return false;
+    }
+}
+
 
 int main(int argc, char **argv)
 {
@@ -251,8 +279,11 @@ int main(int argc, char **argv)
     auto shutdown_type = shutdown_type_t::POWEROFF;
 
     const char *execname = base_name(argv[0]);
-    if (strcmp(execname, "reboot") == 0) {
+    if (strcmp(execname, reboot_execname) == 0) {
         shutdown_type = shutdown_type_t::REBOOT;
+    }
+    else if (strcmp(execname, soft_reboot_execname) == 0) {
+        shutdown_type = shutdown_type_t::SOFTREBOOT;
     }
         
     for (int i = 1; i < argc; i++) {
@@ -274,6 +305,12 @@ int main(int argc, char **argv)
             else if (strcmp(argv[i], "-p") == 0) {
                 shutdown_type = shutdown_type_t::POWEROFF;
             }
+            else if (strcmp(argv[i], "-s") == 0) {
+                shutdown_type = shutdown_type_t::SOFTREBOOT;
+            }
+            else if (strcmp(argv[i], "-k") == 0) {
+                shutdown_type = shutdown_type_t::KEXEC;
+            }
             else if (strcmp(argv[i], "--use-passed-cfd") == 0) {
                 use_passed_cfd = true;
             }
@@ -292,8 +329,16 @@ int main(int argc, char **argv)
         cout << execname << " :   shutdown the system\n"
                 "  --help           : show this help\n"
                 "  -r               : reboot\n"
+                "  -s               : soft-reboot (restart dinit with same boot-time arguments)\n"
+#if defined(RB_HALT_SYSTEM) || defined(RB_HALT)
                 "  -h               : halt system\n"
+#endif
+#ifdef RB_POWER_OFF
                 "  -p               : power down (default)\n"
+#endif
+#ifdef RB_KEXEC
+                "  -k               : stop dinit and reboot directly into kernel loaded with kexec\n"
+#endif
                 "  --use-passed-cfd : use the socket file descriptor identified by the DINIT_CS_FD\n"
                 "                     environment variable to communicate with the init daemon.\n"
                 "  --system         : perform shutdown immediately, instead of issuing shutdown\n"
@@ -304,34 +349,26 @@ int main(int argc, char **argv)
     
     if (sys_shutdown) {
         do_system_shutdown(shutdown_type);
-        return 0;
+        return 1; // likely to cause panic; the above shouldn't return
+    }
+
+    if (reboot_cmd_unsupported(shutdown_type)) {
+        cerr << "Unsupported shutdown type\n";
+        return 1;
     }
 
     signal(SIGPIPE, SIG_IGN);
     
-    int socknum = 0;
+    int socknum = -1;
     
     if (use_passed_cfd) {
-        char * dinit_cs_fd_env = getenv("DINIT_CS_FD");
-        if (dinit_cs_fd_env != nullptr) {
-            char * endptr;
-            long int cfdnum = strtol(dinit_cs_fd_env, &endptr, 10);
-            if (endptr != dinit_cs_fd_env) {
-                socknum = (int) cfdnum;
-                // Set non-blocking mode:
-                int sock_flags = fcntl(socknum, F_GETFL, 0);
-                fcntl(socknum, F_SETFL, sock_flags & ~O_NONBLOCK);
-            }
-            else {
-                use_passed_cfd = false;
-            }
-        }
-        else {
+        socknum = get_passed_cfd();
+        if (socknum == -1) {
             use_passed_cfd = false;
         }
     }
     
-    if (! use_passed_cfd) {
+    if (!use_passed_cfd) {
         socknum = socket(AF_UNIX, SOCK_STREAM, 0);
         if (socknum == -1) {
             perror("socket");
@@ -361,7 +398,7 @@ int main(int argc, char **argv)
         constexpr int bufsize = 2;
         char buf[bufsize];
 
-        buf[0] = DINIT_CP_SHUTDOWN;
+        buf[0] = (dinit_cptypes::cp_cmd_t)cp_cmd::SHUTDOWN;
         buf[1] = static_cast<char>(shutdown_type);
 
         cout << "Issuing shutdown command..." << endl;
@@ -372,7 +409,7 @@ int main(int argc, char **argv)
     
         wait_for_reply(rbuffer, socknum);
         
-        if (rbuffer[0] != DINIT_RP_ACK) {
+        if (rbuffer[0] != (dinit_cptypes::cp_rply_t)cp_rply::ACK) {
             cerr << "shutdown: control socket protocol error" << endl;
             return 1;
         }
@@ -393,7 +430,7 @@ int main(int argc, char **argv)
         cerr << "shutdown: control socket write error: " << std::strerror(e.errcode) << endl;
         return 1;
     }
-    
+
     while (true) {
         pause();
     }
@@ -412,19 +449,45 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
     sigprocmask(SIG_SETMASK, &allsigs, nullptr);
     
     int reboot_type = RB_AUTOBOOT; // reboot
+    const char *shutdown_type_arg = "reboot";
 #if defined(RB_POWER_OFF)
-    if (shutdown_type == shutdown_type_t::POWEROFF) reboot_type = RB_POWER_OFF;
+    if (shutdown_type == shutdown_type_t::POWEROFF) {
+        reboot_type = RB_POWER_OFF;
+        shutdown_type_arg = "poweroff";
+    }
+#elif defined(RB_POWEROFF)
+    // FreeBSD spells it slightly differently
+    if (shutdown_type == shutdown_type_t::POWEROFF) {
+        reboot_type = RB_POWEROFF;
+        shutdown_type_arg = "poweroff";
+    }
+#elif defined(RB_POWERDOWN)
+    // NetBSD (at least) uses RB_POWERDOWN rather than RB_POWER_OFF
+    if (shutdown_type == shutdown_type_t::POWEROFF) {
+        reboot_type = RB_POWERDOWN;
+        shutdown_type_arg = "poweroff";
+    }
 #endif
 #if defined(RB_HALT_SYSTEM)
-    if (shutdown_type == shutdown_type_t::HALT) reboot_type = RB_HALT_SYSTEM;
+    // Linux
+    if (shutdown_type == shutdown_type_t::HALT) {
+        reboot_type = RB_HALT_SYSTEM;
+        shutdown_type_arg = "halt";
+    }
 #elif defined(RB_HALT)
-    if (shutdown_type == shutdown_type_t::HALT) reboot_type = RB_HALT;
+    // NetBSD, FreeBSD
+    if (shutdown_type == shutdown_type_t::HALT) {
+        reboot_type = RB_HALT;
+        shutdown_type_arg = "halt";
+    }
+#endif
+#if defined(RB_KEXEC)
+    if (shutdown_type == shutdown_type_t::KEXEC) reboot_type = RB_KEXEC;
 #endif
     
     // Write to console rather than any terminal, since we lose the terminal it seems:
-    close(STDOUT_FILENO);
     int consfd = open("/dev/console", O_WRONLY);
-    if (consfd != STDOUT_FILENO) {
+    if (consfd != STDOUT_FILENO && consfd != -1) {
         dup2(consfd, STDOUT_FILENO);
     }
     
@@ -453,17 +516,65 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
     } while (! timeout_reached);
 
     kill(-1, SIGKILL);
+
+    // Attempt to execute shutdown hook at three possible locations:
+    const char * const hook_paths[] = {
+            "/etc/dinit/shutdown-hook",
+            "/lib/dinit/shutdown-hook"
+    };
     
+    bool do_unmount_ourself = true;
+    const int execmask = S_IXOTH | S_IXGRP | S_IXUSR;
+    struct stat statbuf;
+
+    for (size_t i = 0; i < sizeof(hook_paths) / sizeof(hook_paths[0]); ++i) {
+        int stat_r = lstat(hook_paths[i], &statbuf);
+        if (stat_r == 0 && (statbuf.st_mode & execmask) != 0) {
+            sub_buf.append("Executing shutdown hook...\n");
+            const char *prog_args[] = { hook_paths[i], shutdown_type_arg, nullptr };
+            try {
+                auto r = run_process(prog_args, loop, sub_buf);
+                if (r.did_exit() && r.get_exit_status() == 0) {
+                    do_unmount_ourself = false;
+                }
+            }
+            catch (std::exception &e) {
+                sub_buf.append("Couldn't fork for shutdown-hook: ");
+                sub_buf.append(e.what());
+                sub_buf.append("\n");
+            }
+            break;
+        }
+    }
+
     // perform shutdown
-    sub_buf.append("Turning off swap...\n");
-    swap_off(loop, sub_buf);
-    sub_buf.append("Unmounting disks...\n");
-    unmount_disks(loop, sub_buf);
+    if (do_unmount_ourself) {
+        sub_buf.append("Turning off swap...\n");
+        swap_off(loop, sub_buf);
+        sub_buf.append("Unmounting disks...\n");
+        unmount_disks(loop, sub_buf);
+    }
+
     sync();
     
     sub_buf.append("Issuing shutdown via kernel...\n");
     loop.poll();  // give message a chance to get to console
-    reboot(reboot_type);
+#ifdef __NetBSD__
+    reboot(reboot_type, NULL);
+#else
+    if (reboot(reboot_type)) {
+        // we're in trouble now
+        sub_buf.append("reboot: ");
+        sub_buf.append(strerror(errno));
+        if (shutdown_type == shutdown_type_t::KEXEC) {
+            sub_buf.append(
+                    "\nIt is possible that no suitable kernel image was loaded before"
+                    "\nreboot with kexec was attempted.\n"
+            );
+        }
+        while (true) loop.run();
+    }
+#endif
 }
 
 // Watcher for subprocess output.
@@ -521,16 +632,19 @@ class subproc_out_watch : public loop_t::fd_watcher_impl<subproc_out_watch>
 
 // Run process, put its output through the subprocess buffer
 //   may throw: std::system_error, std::bad_alloc
-static void run_process(const char * prog_args[], loop_t &loop, subproc_buffer &sub_buf)
+static loop_t::child_proc_watcher::proc_status_t run_process(const char * prog_args[],
+        loop_t &loop, subproc_buffer &sub_buf)
 {
     class sp_watcher_t : public loop_t::child_proc_watcher_impl<sp_watcher_t>
     {
         public:
         bool terminated = false;
+        proc_status_t exit_status;
 
-        rearm status_change(loop_t &, pid_t child, int status)
+        rearm status_change(loop_t &, pid_t child, proc_status_t status)
         {
             terminated = true;
+            exit_status = status;
             return rearm::REMOVE;
         }
     };
@@ -551,7 +665,6 @@ static void run_process(const char * prog_args[], loop_t &loop, subproc_buffer &
     subproc_out_watch owatch {sub_buf};
 
     if (have_pipe) {
-        close(pipefds[1]);
         try {
             owatch.add_watch(loop, pipefds[0], dasynq::IN_EVENTS);
         }
@@ -560,6 +673,7 @@ static void run_process(const char * prog_args[], loop_t &loop, subproc_buffer &
             // our stdout/stderr
             sub_buf.append("Warning: could not create output watch for subprocess\n");
             close(pipefds[0]);
+            close(pipefds[1]);
             have_pipe = false;
         }
     }
@@ -582,20 +696,30 @@ static void run_process(const char * prog_args[], loop_t &loop, subproc_buffer &
         perror(prog_args[0]);
         _exit(1);
     }
+    if (have_pipe) {
+        close(pipefds[1]);
+    }
 
     do {
         loop.run();
-    } while (! sp_watcher.terminated);
+    } while (!sp_watcher.terminated);
 
     if (have_pipe) {
         owatch.deregister(loop);
+        close(pipefds[0]);
     }
+
+    return sp_watcher.exit_status;
 }
 
 static void unmount_disks(loop_t &loop, subproc_buffer &sub_buf)
 {
     try {
+#ifdef __NetBSD__
+        const char * unmount_args[] = { "/sbin/umount", "-a", nullptr };
+#else
         const char * unmount_args[] = { "/bin/umount", "-a", "-r", nullptr };
+#endif
         run_process(unmount_args, loop, sub_buf);
     }
     catch (std::exception &e) {
@@ -608,7 +732,11 @@ static void unmount_disks(loop_t &loop, subproc_buffer &sub_buf)
 static void swap_off(loop_t &loop, subproc_buffer &sub_buf)
 {
     try {
+#ifdef __NetBSD__
+        const char * swapoff_args[] = { "/sbin/swapctl", "-U", nullptr };
+#else
         const char * swapoff_args[] = { "/sbin/swapoff", "-a", nullptr };
+#endif
         run_process(swapoff_args, loop, sub_buf);
     }
     catch (std::exception &e) {

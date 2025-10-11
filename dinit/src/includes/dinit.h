@@ -1,7 +1,7 @@
 #ifndef DINIT_H_INCLUDED
 #define DINIT_H_INCLUDED 1
 
-#include "dasynq.h"
+#include <dasynq.h>
 
 /*
  * General Dinit definitions.
@@ -13,9 +13,10 @@ using clock_type = dasynq::clock_type;
 using rearm = dasynq::rearm;
 using time_val = dasynq::time_val;
 
+class environment;
+
 void rootfs_is_rw() noexcept;
 void setup_external_log() noexcept;
-void read_env_file(const char *);
 
 extern eventloop_t event_loop;
 

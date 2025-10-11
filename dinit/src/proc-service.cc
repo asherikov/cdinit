@@ -20,7 +20,7 @@
 // store a null terminator for the argument. Return a `char *` vector containing the beginning
 // of each argument and a trailing nullptr. (The returned array is invalidated if the string is
 // later modified).
-std::vector<const char *> separate_args(std::string &s,
+std::vector<const char *> separate_args(ha_string &s,
         const std::list<std::pair<unsigned,unsigned>> &arg_indices)
 {
     std::vector<const char *> r;
@@ -44,9 +44,11 @@ std::vector<const char *> separate_args(std::string &s,
 
 void process_service::exec_succeeded() noexcept
 {
-    // This could be a smooth recovery (state already STARTED). Even more, the process
-    // might be stopped (and killed via a signal) during smooth recovery.  We don't to
-    // process startup again in either case, so we check for state STARTING:
+    tracking_child = true;
+
+    // This could be a smooth recovery (state already STARTED). No need to do anything here in
+    // that case. Otherwise, we are STARTING or STOPPING:
+
     if (get_state() == service_state_t::STARTING) {
         if (force_notification_fd != -1 || !notification_var.empty()) {
             // Wait for readiness notification:
@@ -60,6 +62,13 @@ void process_service::exec_succeeded() noexcept
             started();
         }
     }
+    else if (get_state() == service_state_t::STARTED) {
+        // Smooth recovery (is now complete, if we don't need readiness notification)
+        if (waiting_stopstart_timer && notification_fd == -1) {
+            process_timer.stop_timer(event_loop);
+            waiting_stopstart_timer = false;
+        }
+    }
     else if (get_state() == service_state_t::STOPPING) {
         // stopping, but smooth recovery was in process. That's now over so we can
         // commence normal stop. Note that if pid == -1 the process already stopped,
@@ -70,10 +79,16 @@ void process_service::exec_succeeded() noexcept
     }
 }
 
+void bgproc_service::exec_succeeded() noexcept
+{
+    // For bgproc service, unlike regular process service, successful execution doesn't mean much;
+    // the process has to terminate (after forking) before we consider it started.
+}
+
 void scripted_service::exec_succeeded() noexcept
 {
-	// For a scripted service, this means nothing other than that the start/stop
-	// script will now begin.
+    // For a scripted service, this means nothing other than that the start/stop
+    // script will now begin.
 }
 
 rearm exec_status_pipe_watcher::fd_event(eventloop_t &loop, int fd, int flags) noexcept
@@ -97,6 +112,7 @@ rearm exec_status_pipe_watcher::fd_event(eventloop_t &loop, int fd, int flags) n
             }
         }
         sr->pid = -1;
+        sr->exec_err_info = exec_status;
         sr->exec_failed(exec_status);
     }
     else {
@@ -104,7 +120,51 @@ rearm exec_status_pipe_watcher::fd_event(eventloop_t &loop, int fd, int flags) n
 
         if (sr->pid == -1) {
             // Somehow the process managed to complete before we even saw the exec() status.
-            sr->handle_exit_status(sr->exit_status);
+            sr->handle_exit_status();
+        }
+    }
+
+    sr->services->process_queues();
+
+    return rearm::REMOVED;
+}
+
+rearm stop_status_pipe_watcher::fd_event(eventloop_t &loop, int fd, int flags) noexcept
+{
+    process_service *sr = service;
+    sr->waiting_for_execstat = false;
+
+    run_proc_err exec_status;
+    int r = read(get_watched_fd(), &exec_status, sizeof(exec_status));
+    deregister(loop);
+    close(get_watched_fd());
+
+    if (r > 0) {
+        // We read an errno code; exec() failed, and the service startup failed.
+        if (sr->stop_pid != -1) {
+            log(loglevel_t::ERROR, "Service ", sr->get_name(), ": could not fork for stop command: ",
+                    exec_stage_descriptions[static_cast<int>(exec_status.stage)], ": ",
+                    strerror(exec_status.st_errno));
+
+            sr->stop_watcher.deregister(event_loop, sr->stop_pid);
+            sr->reserved_child_watch = false;
+            sr->stop_pid = -1;
+            if (sr->pid != -1) {
+                if (sr->term_signal != 0) {
+                    sr->kill_pg(sr->term_signal);
+                }
+                if (!sr->tracking_child) {
+                    sr->stop_issued = false;
+                    sr->stopped();
+                }
+            }
+        }
+    }
+    else {
+        // Nothing to do really but wait for termination - unless it's already happened, so let's
+        // check that now:
+        if (sr->stop_pid == -1) {
+            sr->handle_stop_exit();
         }
     }
 
@@ -131,10 +191,11 @@ rearm ready_notify_watcher::fd_event(eventloop_t &, int fd, int flags) noexcept
                 service->process_timer.stop_timer(event_loop);
                 service->waiting_stopstart_timer = false;
             }
-            service->failed_to_start(false, false);
             service->set_state(service_state_t::STOPPING);
+            service->failed_to_start(false, false);
             service->bring_down();
         }
+        service->services->process_queues();
     }
     else {
         // Just keep consuming data from the pipe:
@@ -147,20 +208,24 @@ rearm ready_notify_watcher::fd_event(eventloop_t &, int fd, int flags) noexcept
         }
     }
 
-    service->services->process_queues();
     return rearm::REARM;
 }
 
-dasynq::rearm service_child_watcher::status_change(eventloop_t &loop, pid_t child, int status) noexcept
+dasynq::rearm service_child_watcher::status_change(eventloop_t &loop, pid_t child,
+        service_child_watcher::proc_status_t status) noexcept
 {
     base_process_service *sr = service;
 
     sr->pid = -1;
-    sr->exit_status = bp_sys::exit_status(status);
+    sr->exit_status = status;
 
     // Ok, for a process service, any process death which we didn't rig ourselves is a bit... unexpected.
     // Probably, the child died because we asked it to (sr->service_state == STOPPING). But even if we
     // didn't, there's not much we can do.
+
+    // Must stop watch now since handle_exit_status might result in re-launch:
+    // (stop_watch instead of deregister, so that we hold watch reservation).
+    stop_watch(loop);
 
     if (sr->waiting_for_execstat) {
         // We still don't have an exec() status from the forked child, wait for that
@@ -168,24 +233,96 @@ dasynq::rearm service_child_watcher::status_change(eventloop_t &loop, pid_t chil
         return dasynq::rearm::NOOP; // hold watch reservation
     }
 
-    // Must stop watch now since handle_exit_status might result in re-launch:
-    // (stop_watch instead of deregister, so that we hold watch reservation).
-    stop_watch(loop);
-
     if (sr->waiting_stopstart_timer) {
         sr->process_timer.stop_timer(loop);
         sr->waiting_stopstart_timer = false;
     }
 
-    sr->handle_exit_status(bp_sys::exit_status(status));
+    sr->handle_exit_status();
     return dasynq::rearm::NOOP;
 }
 
-void process_service::handle_exit_status(bp_sys::exit_status exit_status) noexcept
+dasynq::rearm stop_child_watcher::status_change(eventloop_t &loop, pid_t child,
+        stop_child_watcher::proc_status_t status) noexcept
+{
+    process_service *sr = service;
+
+    sr->stop_pid = -1;
+    sr->stop_status = status;
+    stop_watch(loop);
+
+    if (sr->waiting_for_execstat) {
+        // no exec status yet, wait for that first
+        return dasynq::rearm::NOOP;
+    }
+
+    sr->handle_stop_exit();
+    sr->services->process_queues();
+    return dasynq::rearm::NOOP;
+}
+
+rearm log_output_watcher::fd_event(eventloop_t &eloop, int fd, int flags) noexcept
+{
+    // In case buffer size has been decreased, check if we are already at the limit:
+    if (service->log_buf_size >= service->log_buf_max) {
+        // If so, read and discard.
+        char buf[1024];
+        int r = bp_sys::read(fd, buf, 1024);
+        if (r == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                return rearm::REARM;
+            }
+            goto bad_read;
+        }
+        if (r == 0) goto eof_read;
+        return rearm::REARM;
+    }
+
+    {
+        size_t max_read = std::max(service->log_buf_max / 8, 256u);
+        max_read = std::min((unsigned)max_read, service->log_buf_max - service->log_buf_size);
+
+        // ensure vector has size sufficient to read
+        unsigned new_size = service->log_buf_size + max_read;
+        if (!service->ensure_log_buffer_backing(new_size)) {
+            return rearm::DISARM;
+        }
+
+        max_read = service->log_buffer.size() - service->log_buf_size;
+
+        int r = bp_sys::read(fd, service->log_buffer.data() + service->log_buf_size, max_read);
+        if (r == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                return rearm::REARM;
+            }
+            goto bad_read;
+        }
+
+        if (r == 0) goto eof_read;
+
+        service->log_buf_size += r;
+        return rearm::REARM;
+    }
+
+    // error/end-of-stream handling:
+
+    bad_read:
+    log(loglevel_t::WARN, "Service ", service->get_name(), " output not readable: ", strerror(errno));
+
+    eof_read:
+    deregister(eloop);
+    close(fd);
+    close(service->log_output_fd);
+    service->log_input_fd = -1;
+    service->log_output_fd = -1;
+    return rearm::REMOVED;
+}
+
+void process_service::handle_exit_status() noexcept
 {
     bool did_exit = exit_status.did_exit();
     bool was_signalled = exit_status.was_signalled();
-    auto service_state = get_state();
+    auto current_state = get_state();
 
     if (notification_fd != -1) {
         readiness_watcher.deregister(event_loop);
@@ -193,20 +330,25 @@ void process_service::handle_exit_status(bp_sys::exit_status exit_status) noexce
         notification_fd = -1;
     }
 
-    if (!exit_status.did_exit_clean() && service_state != service_state_t::STOPPING) {
+    if (!exit_status.did_exit_clean() && current_state != service_state_t::STOPPING) {
         if (did_exit) {
             log(loglevel_t::ERROR, "Service ", get_name(), " process terminated with exit code ",
                     exit_status.get_exit_status());
         }
         else if (was_signalled) {
             log(loglevel_t::ERROR, "Service ", get_name(), " terminated due to signal ",
-                    exit_status.get_term_sig());
+                    exit_status.get_signal());
         }
     }
 
     if (waiting_stopstart_timer) {
         process_timer.stop_timer(event_loop);
         waiting_stopstart_timer = false;
+        if (current_state == service_state_t::STARTED) {
+            // Must have been in smooth recovery and waiting for readiness notification.
+            // Treat this the same as if we were STARTING:
+            current_state = service_state_t::STARTING;
+        }
     }
 
 #if USE_UTMPX
@@ -215,22 +357,31 @@ void process_service::handle_exit_status(bp_sys::exit_status exit_status) noexce
     }
 #endif
 
-    if (service_state == service_state_t::STARTING) {
+    if (current_state == service_state_t::STARTING) {
         // If state is STARTING, we must be waiting for readiness notification; the process has
         // terminated before becoming ready.
         stop_reason = stopped_reason_t::FAILED;
         failed_to_start();
     }
-    else if (service_state == service_state_t::STOPPING) {
+    else if (current_state == service_state_t::STOPPING) {
         // We won't log a non-zero exit status or termination due to signal here -
         // we assume that the process died because we signalled it.
         if (waiting_stopstart_timer) {
             process_timer.stop_timer(event_loop);
         }
-        stopped();
+        if (!waiting_for_deps) {
+            if (stop_pid == -1 && !waiting_for_execstat) {
+                stop_issued = false; // reset for next time
+                stopped();
+            }
+        }
+        else if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
+            initiate_start();
+        }
     }
-    else if (smooth_recovery && service_state == service_state_t::STARTED) {
+    else if (smooth_recovery && current_state == service_state_t::STARTED && check_restart()) {
         // unexpected termination, with smooth recovery
+        doing_smooth_recovery = true;
         do_smooth_recovery();
         return;
     }
@@ -258,37 +409,39 @@ void process_service::exec_failed(run_proc_err errcode) noexcept
 
     if (get_state() == service_state_t::STARTING) {
         stop_reason = stopped_reason_t::EXECFAILED;
+        set_state(service_state_t::STOPPING);
         failed_to_start();
     }
     else {
         // Process service in smooth recovery:
+        doing_smooth_recovery = false;
         stop_reason = stopped_reason_t::TERMINATED;
         unrecoverable_stop();
     }
 }
 
-void bgproc_service::handle_exit_status(bp_sys::exit_status exit_status) noexcept
+void bgproc_service::handle_exit_status() noexcept
 {
     // For bgproc services, receiving exit status can mean one of two things:
     // 1. We were launching the process, and it finished (possibly after forking). If it did fork
     //    we want to obtain the process id of the process that we should now monitor, the actual
-    //    daemon.
+    //    daemon. Or,
     // 2. The above has already happened, and we are monitoring the daemon process, which has now
     //    terminated for some reason.
 
     begin:
     bool did_exit = exit_status.did_exit();
     bool was_signalled = exit_status.was_signalled();
-    auto service_state = get_state();
+    auto current_state = get_state();
 
-    if (!exit_status.did_exit_clean() && service_state != service_state_t::STOPPING) {
+    if (!exit_status.did_exit_clean() && current_state != service_state_t::STOPPING) {
         if (did_exit) {
             log(loglevel_t::ERROR, "Service ", get_name(), " process terminated with exit code ",
                     exit_status.get_exit_status());
         }
         else if (was_signalled) {
             log(loglevel_t::ERROR, "Service ", get_name(), " terminated due to signal ",
-                    exit_status.get_term_sig());
+                    exit_status.get_signal());
         }
     }
 
@@ -302,15 +455,25 @@ void bgproc_service::handle_exit_status(bp_sys::exit_status exit_status) noexcep
 
         // We're either started, or stopping (i.e. we were requested to stop during smooth recovery).
 
-        if (service_state == service_state_t::STOPPING) {
+        if (current_state == service_state_t::STOPPING) {
             // Stop was issued during smooth recovery
             if ((did_exit && exit_status.get_exit_status() != 0) || was_signalled) {
-                stopped();
+                if (!waiting_for_deps) {
+                    stopped();
+                }
+                else if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
+                    initiate_start();
+                }
             }
             else {
                 // We need to re-read the PID, since it has now changed.
                 if (pid_file.length() != 0) {
                     auto pid_result = read_pid_file(&exit_status);
+
+                    if (waiting_for_deps) {
+                        // don't do anything else until dependents have stopped
+                        return;
+                    }
 
                     switch (pid_result) {
                     case pid_result_t::FAILED:
@@ -321,7 +484,7 @@ void bgproc_service::handle_exit_status(bp_sys::exit_status exit_status) noexcep
                     case pid_result_t::OK:
                         // We now need to bring down the daemon process
                         bring_down();
-                        return;
+                        break;
                     }
                 }
             }
@@ -362,9 +525,7 @@ void bgproc_service::handle_exit_status(bp_sys::exit_status exit_status) noexcep
         }
     }
 
-    if (service_state == service_state_t::STARTING) {
-        // POSIX requires that if the process exited clearly with a status code of 0,
-        // the exit status value will be 0:
+    if (current_state == service_state_t::STARTING) {
         if (exit_status.did_exit_clean()) {
             auto pid_result = read_pid_file(&exit_status);
             switch (pid_result) {
@@ -387,14 +548,17 @@ void bgproc_service::handle_exit_status(bp_sys::exit_status exit_status) noexcep
             failed_to_start();
         }
     }
-    else if (service_state == service_state_t::STOPPING) {
+    else if (current_state == service_state_t::STOPPING) {
         // We won't log a non-zero exit status or termination due to signal here -
         // we assume that the process died because we signalled it.
-        stopped();
+        if (stop_pid == -1 && !waiting_for_execstat) {
+            stop_issued = false;
+            stopped();
+        }
     }
     else {
         // we must be STARTED
-        if (smooth_recovery && get_target_state() == service_state_t::STARTED) {
+        if (smooth_recovery && get_target_state() == service_state_t::STARTED && check_restart()) {
             doing_smooth_recovery = true;
             do_smooth_recovery();
             if (get_state() != service_state_t::STARTED) {
@@ -412,23 +576,36 @@ void bgproc_service::exec_failed(run_proc_err errcode) noexcept
     log(loglevel_t::ERROR, get_name(), ": execution failed - ",
             exec_stage_descriptions[static_cast<int>(errcode.stage)], ": ", strerror(errcode.st_errno));
 
-    // Only time we execute is for startup:
-    stop_reason = stopped_reason_t::EXECFAILED;
-    failed_to_start();
+    if (waiting_stopstart_timer) {
+        process_timer.stop_timer(event_loop);
+        waiting_stopstart_timer = false;
+    }
+
+    if (doing_smooth_recovery) {
+        doing_smooth_recovery = false;
+        stop_reason = stopped_reason_t::TERMINATED;
+        unrecoverable_stop();
+    }
+    else {
+        // Only time we execute is for startup:
+        stop_reason = stopped_reason_t::EXECFAILED;
+        set_state(service_state_t::STOPPING);
+        failed_to_start();
+    }
 }
 
-void scripted_service::handle_exit_status(bp_sys::exit_status exit_status) noexcept
+void scripted_service::handle_exit_status() noexcept
 {
     bool did_exit = exit_status.did_exit();
     bool was_signalled = exit_status.was_signalled();
-    auto service_state = get_state();
+    auto current_state = get_state();
 
     // For a scripted service, a termination occurs in one of three main cases:
     // - the start script completed (or failed), when service was STARTING
     // - the start script was interrupted to cancel startup; state is STOPPING
     // - the stop script complete (or failed), state is STOPPING
 
-    if (service_state == service_state_t::STOPPING) {
+    if (current_state == service_state_t::STOPPING) {
         // We might be running the stop script, or we might be running the start script and have issued
         // a cancel order via SIGINT:
         if (interrupting_start) {
@@ -446,7 +623,7 @@ void scripted_service::handle_exit_status(bp_sys::exit_status exit_status) noexc
             else {
                 if (was_signalled) {
                     log(loglevel_t::NOTICE, "Service ", get_name(), " start cancelled from signal ",
-                            exit_status.get_term_sig());
+                            exit_status.get_signal());
                 }
                 // If the start script completed successfully, or was interrupted via our signal,
                 // we want to run the stop script to clean up:
@@ -466,7 +643,7 @@ void scripted_service::handle_exit_status(bp_sys::exit_status exit_status) noexc
             }
             else if (was_signalled) {
                 log(loglevel_t::WARN, "Service ", get_name(), " stop command terminated due to signal ",
-                        exit_status.get_term_sig());
+                        exit_status.get_signal());
             }
             // Even if the stop script failed, assume that service is now stopped, so that any dependencies
             // can be stopped. There's not really any other useful course of action here.
@@ -478,7 +655,7 @@ void scripted_service::handle_exit_status(bp_sys::exit_status exit_status) noexc
         if (exit_status.did_exit_clean()) {
             started();
         }
-        else if (was_signalled && exit_status.get_term_sig() == SIGINT && onstart_flags.skippable) {
+        else if (was_signalled && exit_status.get_signal() == SIGINT && onstart_flags.skippable) {
             // A skippable service can be skipped by interrupting (eg by ^C if the service
             // starts on the console).
             start_skipped = true;
@@ -492,7 +669,7 @@ void scripted_service::handle_exit_status(bp_sys::exit_status exit_status) noexc
             }
             else if (was_signalled) {
                 log(loglevel_t::ERROR, "Service ", get_name(), " command terminated due to signal ",
-                        exit_status.get_term_sig());
+                        exit_status.get_signal());
             }
             stop_reason = stopped_reason_t::FAILED;
             failed_to_start();
@@ -505,12 +682,12 @@ void scripted_service::exec_failed(run_proc_err errcode) noexcept
 {
     log(loglevel_t::ERROR, get_name(), ": execution failed - ",
             exec_stage_descriptions[static_cast<int>(errcode.stage)], ": ", strerror(errcode.st_errno));
-    auto service_state = get_state();
-    if (service_state == service_state_t::STARTING) {
+    auto current_state = get_state();
+    if (current_state == service_state_t::STARTING) {
         stop_reason = stopped_reason_t::EXECFAILED;
         failed_to_start();
     }
-    else if (service_state == service_state_t::STOPPING) {
+    else if (current_state == service_state_t::STOPPING) {
         // We've logged the failure, but it's probably better not to leave the service in
         // STOPPING state:
         stopped();
@@ -524,7 +701,7 @@ template <typename T> typename std::make_unsigned<T>::type make_unsigned_val(T v
 }
 
 bgproc_service::pid_result_t
-bgproc_service::read_pid_file(bp_sys::exit_status *exit_status) noexcept
+bgproc_service::read_pid_file(proc_status_t *exit_status) noexcept
 {
     const char *pid_file_c = pid_file.c_str();
     int fd = bp_sys::open(pid_file_c, O_CLOEXEC);
@@ -546,40 +723,40 @@ bgproc_service::read_pid_file(bp_sys::exit_status *exit_status) noexcept
     pidbuf[r] = 0; // store nul terminator
 
     bool valid_pid = false;
-    try {
-        unsigned long long v = std::stoull(pidbuf, nullptr, 0);
+    errno = 0;
+    char *eptr;
+    unsigned long long v = std::strtoull(pidbuf, &eptr, 0);
+    if (errno == 0 && eptr != pidbuf) {
         if (v <= make_unsigned_val(std::numeric_limits<pid_t>::max())) {
             pid = (pid_t) v;
             valid_pid = true;
         }
     }
-    catch (std::out_of_range &exc) {
-        // Too large?
-    }
-    catch (std::invalid_argument &exc) {
-        // Ok, so it doesn't look like a number: proceed...
-    }
 
     if (valid_pid) {
-        pid_t wait_r = waitpid(pid, exit_status, WNOHANG);
-        if (wait_r == -1 && errno == ECHILD) {
+        siginfo_t child_info;
+        child_info.si_pid = 0; // for portability
+        int waitid_r = bp_sys::waitid(P_PID, pid, &child_info, WNOHANG | WEXITED);
+        if (waitid_r == -1 && errno == ECHILD) {
             // We can't track this child - check process exists:
             if (bp_sys::kill(pid, 0) == 0 || errno != ESRCH) {
+                log(loglevel_t::WARN, get_name(), ": unable to supervise process with pid ", pid);
                 tracking_child = false;
                 return pid_result_t::OK;
             }
-            else {
-                log(loglevel_t::ERROR, get_name(), ": pid read from pidfile (", pid, ") is not valid");
-                pid = -1;
-                return pid_result_t::FAILED;
-            }
-        }
-        else if (wait_r == pid) {
+
+            log(loglevel_t::ERROR, get_name(), ": pid read from pidfile (", pid, ") is not valid");
             pid = -1;
-            return pid_result_t::TERMINATED;
+            return pid_result_t::FAILED;
         }
-        else if (wait_r == 0) {
-            // We can track the child
+        else if (waitid_r == 0) {
+            if (child_info.si_pid != 0) {
+                pid = -1;
+                *exit_status = proc_status_t(child_info.si_code, child_info.si_status);
+                return pid_result_t::TERMINATED;
+            }
+
+            // Child hasn't terminated, but we can track it (no error)
             child_listener.add_reserved(event_loop, pid, dasynq::DEFAULT_PRIORITY - 10);
             tracking_child = true;
             reserved_child_watch = true;
@@ -594,19 +771,47 @@ bgproc_service::read_pid_file(bp_sys::exit_status *exit_status) noexcept
 
 void process_service::bring_down() noexcept
 {
+    if (stop_pid != -1 || stop_issued) {
+        // waiting for stop command to complete (or for process to die after it has complete);
+        // can't do anything here.
+        return;
+    }
     if (waiting_for_execstat) {
         // The process is still starting. This should be uncommon, but can occur during
-        // smooth recovery. We can't do much now; we have to wait until we get the
-        // status, and then act appropriately.
+        // smooth recovery (or it may mean the stop command process is still starting). We can't
+        // do much now; we have to wait until we get the status, and then act appropriately.
         return;
     }
     else if (pid != -1) {
-        // The process is still kicking on - must actually kill it. We signal the process
-        // group (-pid) rather than just the process as there's less risk then of creating
-        // an orphaned process group:
-        if (term_signal != 0) {
+        // The process is still kicking on - must actually kill it.
+        if (!stop_command.empty() && !stop_issued) {
+            if (start_stop_process(stop_arg_parts)) {
+                goto arm_timer;
+            }
+
+            // stop-command failed, need to try something else:
+            if (term_signal != 0) {
+                kill_pg(term_signal);
+            }
+            else {
+                kill_pg(SIGKILL);
+            }
+        }
+        else if (term_signal != 0) {
+            // We signal the process group (-pid) rather than just the process as there's less
+            // risk then of creating an orphaned process group:
             kill_pg(term_signal);
         }
+
+        if (stop_pid == -1 && !tracking_child) {
+            // If we have no way of tracking when the child terminates, assume stopped now
+            stopped();
+            return;
+        }
+
+        arm_timer:
+
+        stop_issued = true; // (don't try again)
 
         // If there's a stop timeout, arm the timer now:
         if (stop_timeout != time_val(0,0)) {
@@ -617,7 +822,8 @@ void process_service::bring_down() noexcept
         // The rest is done in handle_exit_status.
     }
     else {
-        // The process is already dead.
+        // The process is already dead (possibly, we are in smooth recovery waiting for timer)
+        doing_smooth_recovery = false;
         if (waiting_restart_timer) {
             process_timer.stop_timer(event_loop);
             waiting_restart_timer = false;
@@ -626,39 +832,29 @@ void process_service::bring_down() noexcept
     }
 }
 
-void bgproc_service::bring_down() noexcept
+void process_service::kill_with_fire() noexcept
 {
-    if (pid != -1) {
-        // The process is still kicking on - must actually kill it. We signal the process
-        // group (-pid) rather than just the process as there's less risk then of creating
-        // an orphaned process group:
-        if (term_signal != 0) {
-            kill_pg(SIGTERM);
-        }
+    base_process_service::kill_with_fire();
 
-        // In most cases, the rest is done in handle_exit_status.
-        // If we are a BGPROCESS and the process is not our immediate child, however, that
-        // won't work - check for this now:
-        if (! tracking_child) {
-            stopped();
+    if (stop_pid != -1) {
+        log(loglevel_t::WARN, "Service ", get_name(), " stop command, with pid ", pid,
+                ", exceeded allowed stop time; killing.");
+        pid_t pgid = bp_sys::getpgid(stop_pid);
+        if (pgid == -1) {
+            // On OpenBSD, not allowed to query pgid of a process in another session, but in that
+            // case we know the group anyway:
+            pgid = stop_pid;
         }
-        else if (stop_timeout != time_val(0,0)) {
-            process_timer.arm_timer_rel(event_loop, stop_timeout);
-            waiting_stopstart_timer = true;
-        }
-    }
-    else {
-        // The process is already dead.
-        stopped();
+        bp_sys::kill(-pgid, SIGKILL);
     }
 }
 
 void scripted_service::bring_down() noexcept
 {
-	if (pid != -1) {
-		// We're already running the stop script; nothing to do.
-		return;
-	}
+    if (pid != -1) {
+        // We're already running the stop script; nothing to do.
+        return;
+    }
 
     if (stop_command.length() == 0) {
         stopped();
@@ -682,4 +878,99 @@ dasynq::rearm process_restart_timer::timer_expiry(eventloop_t &, int expiry_coun
 
     // Leave the timer disabled, or, if it has been reset by any processing above, leave it armed:
     return dasynq::rearm::NOOP;
+}
+
+bool process_service::start_stop_process(const std::vector<const char *> &cmd) noexcept
+{
+    // In general, you can't tell whether fork/exec is successful. We use a pipe to communicate
+    // success/failure from the child to the parent. The pipe is set CLOEXEC so a successful
+    // exec closes the pipe, and the parent sees EOF. If the exec is unsuccessful, the errno
+    // is written to the pipe, and the parent can read it.
+
+    int pipefd[2];
+    if (bp_sys::pipe2(pipefd, O_CLOEXEC)) {
+        log(loglevel_t::ERROR, get_name(), ": can't create status check pipe (for stop command): ",
+                strerror(errno));
+        return false;
+    }
+
+    const char * logfile = this->logfile.c_str();
+    if (*logfile == 0) {
+        logfile = "/dev/null";
+    }
+
+    bool child_status_registered = false;
+
+    // Set up complete, now fork and exec:
+
+    pid_t forkpid;
+
+    try {
+        stop_pipe_watcher.add_watch(event_loop, pipefd[0], dasynq::IN_EVENTS);
+        child_status_registered = true;
+
+        // We specify a high priority (i.e. low priority value) so that process termination is
+        // handled early. This means we have always recorded that the process is terminated by the
+        // time that we handle events that might otherwise cause us to signal the process, so we
+        // avoid sending a signal to an invalid (and possibly recycled) process ID.
+        forkpid = stop_watcher.fork(event_loop, reserved_stop_watch, dasynq::DEFAULT_PRIORITY - 10);
+        reserved_stop_watch = true;
+    }
+    catch (std::exception &e) {
+        log(loglevel_t::ERROR, get_name(), ": could not fork (for stop command): ", e.what());
+        goto out_cs_h;
+    }
+
+    if (forkpid == 0) {
+        close(pipefd[0]);
+        const char * working_dir_c = service_dsc_dir;
+        if (! working_dir.empty()) working_dir_c = working_dir.c_str();
+        run_proc_params run_params{cmd.data(), working_dir_c, logfile, pipefd[1], run_as_uid, run_as_gid, rlimits};
+        run_params.on_console = false;
+        run_params.in_foreground = false;
+        run_params.csfd = -1;
+        run_params.socket_fd = socket_fd;
+        run_params.notify_fd = -1;
+        run_params.force_notify_fd = -1;
+        run_params.notify_var = nullptr;
+        run_params.env_file = env_file.c_str();
+        run_params.nice_is_set = nice_is_set;
+        run_params.nice = nice;
+        #if SUPPORT_CGROUPS
+        run_params.run_in_cgroup = run_in_cgroup.c_str();
+        #endif
+        #if SUPPORT_CAPABILITIES
+        run_params.cap_iab = cap_iab.get();
+        run_params.secbits = secbits;
+        run_params.no_new_privs = onstart_flags.no_new_privs;
+        #endif
+        #if SUPPORT_IOPRIO
+        run_params.ioprio = ioprio;
+        #endif
+        #if SUPPORT_OOM_ADJ
+        run_params.oom_adj_is_set = oom_adj_is_set;
+        run_params.oom_adj = oom_adj;
+        #endif
+        run_child_proc(run_params);
+    }
+    else {
+        // Parent process
+        stop_pid = forkpid;
+
+        bp_sys::close(pipefd[1]); // close the 'other end' fd
+        waiting_for_execstat = true;
+        return true;
+    }
+
+    // Failure exit:
+
+    out_cs_h:
+    if (child_status_registered) {
+        stop_pipe_watcher.deregister(event_loop);
+    }
+
+    bp_sys::close(pipefd[0]);
+    bp_sys::close(pipefd[1]);
+
+    return false;
 }

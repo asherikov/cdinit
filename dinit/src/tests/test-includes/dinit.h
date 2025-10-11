@@ -8,7 +8,7 @@
 #include <string>
 #include <cassert>
 
-#include "dasynq.h"
+#include <dasynq.h>
 
 using clock_type = dasynq::clock_type;
 using rearm = dasynq::rearm;
@@ -58,6 +58,29 @@ class eventloop_t
     class child_proc_watcher
     {
         public:
+        class proc_status {
+            int wait_si_code; // CLD_EXITED or a signal-related status
+            int wait_si_status; // exit status as per exit(...), or signal number
+
+            public:
+            proc_status() noexcept : wait_si_code(0), wait_si_status(0) {}
+            proc_status(int wait_si_code, int wait_si_status) noexcept
+                : wait_si_code(wait_si_code), wait_si_status(wait_si_status) {}
+            proc_status(const proc_status &) noexcept = default;
+            proc_status &operator=(const proc_status &) noexcept = default;
+
+            bool did_exit() noexcept { return wait_si_code == CLD_EXITED; }
+            bool did_exit_clean() noexcept { return wait_si_status == 0; }
+            bool was_signalled() noexcept { return !did_exit(); }
+            int get_exit_status() noexcept { return wait_si_status; }
+            int get_signal() noexcept { return wait_si_status; }
+
+            int get_si_code() noexcept { return wait_si_code; }
+            int get_si_status() noexcept { return wait_si_status; }
+        };
+
+        using proc_status_t = proc_status;
+
         pid_t fork(eventloop_t &loop, bool reserved_child_watcher, int priority = dasynq::DEFAULT_PRIORITY)
         {
             bp_sys::last_forked_pid++;
@@ -134,44 +157,51 @@ class eventloop_t
 
     class bidi_fd_watcher
     {
-    	int watched_fd = -1;
+        int watch_flags = -1;
+        int watched_fd = -1;
 
-    	public:
-    	void set_watches(eventloop_t &eloop, int newFlags) noexcept
-    	{
+        public:
+        void set_watches(eventloop_t &eloop, int newFlags) noexcept
+        {
+            watch_flags = newFlags;
+        }
 
-    	}
+        int get_watches(eventloop_t &eloop) noexcept
+        {
+            return watch_flags;
+        }
 
-    	void add_watch(eventloop_t &eloop, int fd, int flags, int inprio = dasynq::DEFAULT_PRIORITY,
-    			int outprio = dasynq::DEFAULT_PRIORITY)
-    	{
-    		if (eloop.regd_bidi_watchers.find(fd) != eloop.regd_bidi_watchers.end()) {
-    			throw std::string("must not add_watch when already active");
-    		}
-    		eloop.regd_bidi_watchers[fd] = this;
-    		watched_fd = fd;
-    	}
+        void add_watch(eventloop_t &eloop, int fd, int flags, int inprio = dasynq::DEFAULT_PRIORITY,
+                int outprio = dasynq::DEFAULT_PRIORITY)
+        {
+            if (eloop.regd_bidi_watchers.find(fd) != eloop.regd_bidi_watchers.end()) {
+                throw std::string("must not add_watch when already active");
+            }
+            eloop.regd_bidi_watchers[fd] = this;
+            watched_fd = fd;
+            watch_flags = flags;
+        }
 
-    	int get_watched_fd() noexcept
-    	{
-    		return watched_fd;
-    	}
+        int get_watched_fd() noexcept
+        {
+            return watched_fd;
+        }
 
-    	void deregister(eventloop_t &eloop) noexcept
-    	{
-    		eloop.regd_bidi_watchers.erase(watched_fd);
-    		watched_fd = -1;
-    	}
+        void deregister(eventloop_t &eloop) noexcept
+        {
+            eloop.regd_bidi_watchers.erase(watched_fd);
+            watched_fd = -1;
+        }
 
-    	// In the real implementation these are not virtual, but it is easier for testing if they are:
-    	virtual rearm read_ready(eventloop_t &loop, int fd) noexcept = 0;
-    	virtual rearm write_ready(eventloop_t &loop, int fd) noexcept = 0;
+        // In the real implementation these are not virtual, but it is easier for testing if they are:
+        virtual rearm read_ready(eventloop_t &loop, int fd) noexcept = 0;
+        virtual rearm write_ready(eventloop_t &loop, int fd) noexcept = 0;
     };
 
     template <typename Derived> class bidi_fd_watcher_impl : public bidi_fd_watcher
-	{
+    {
 
-	};
+    };
 
     class timer
     {
@@ -219,8 +249,8 @@ class eventloop_t
     };
 
     std::unordered_set<timer *> active_timers;
-	std::map<int, bidi_fd_watcher *> regd_bidi_watchers;
-	std::map<int, fd_watcher *> regd_fd_watchers;
+    std::map<int, bidi_fd_watcher *> regd_bidi_watchers;
+    std::map<int, fd_watcher *> regd_fd_watchers;
 };
 
 inline void rootfs_is_rw() noexcept
@@ -228,10 +258,6 @@ inline void rootfs_is_rw() noexcept
 }
 
 inline void setup_external_log() noexcept
-{
-}
-
-inline void read_env_file(const char *env_file_path)
 {
 }
 

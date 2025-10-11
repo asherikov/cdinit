@@ -10,13 +10,17 @@
 
 #include <unistd.h>
 
-#include "dinit.h"
-#include "dinit-log.h"
-#include "control-cmds.h"
-#include "service-listener.h"
-#include "cpbuffer.h"
+#include <dinit.h>
+#include <dinit-log.h>
+#include <dinit-env.h>
+#include <control-cmds.h>
+#include <service-listener.h>
+#include <cpbuffer.h>
+#include <control-datatypes.h>
 
 // Control connection for dinit
+
+constexpr int OUTBUF_LIMIT = 16384; // Output buffer high-water mark
 
 class control_conn_t;
 class control_conn_watcher;
@@ -78,15 +82,10 @@ class control_conn_watcher : public eventloop_t::bidi_fd_watcher_impl<control_co
     }
 };
 
-class control_conn_t : private service_listener
+class control_conn_t : private service_listener, private env_listener
 {
     friend rearm control_conn_cb(eventloop_t *loop, control_conn_watcher *watcher, int revents);
     friend class control_conn_t_test;
-    
-    public:
-    // A mapping between service records and their associated numerical identifier used
-    // in communction
-    using handle_t = uint32_t;
 
     private:
     control_conn_watcher iob;
@@ -98,7 +97,7 @@ class control_conn_t : private service_listener
 
     // The packet length before we need to re-check if the packet is complete.
     // process_packet() will not be called until the packet reaches this size.
-    int chklen;
+    unsigned chklen;
     
     // Receive buffer
     cpbuffer<1024> rbuf;
@@ -106,11 +105,13 @@ class control_conn_t : private service_listener
     template <typename T> using list = std::list<T>;
     template <typename T> using vector = std::vector<T>;
     
-    std::unordered_multimap<service_record *, handle_t> service_key_map;
-    std::map<handle_t, service_record *> key_service_map;
+    std::unordered_multimap<service_record *, dinit_cptypes::handle_t> service_key_map;
+    std::map<dinit_cptypes::handle_t, service_record *> key_service_map;
     
-    // Buffer for outgoing packets. Each outgoing back is represented as a vector<char>.
+    // Buffer for outgoing packets. Each outgoing packet is represented as a vector<char>.
     list<vector<char>> outbuf;
+    // Current output buffer size in bytes.
+    unsigned outbuf_size = 0;
     // Current index within the first outgoing packet (all previous bytes have been sent).
     unsigned outpkt_index = 0;
     
@@ -135,10 +136,13 @@ class control_conn_t : private service_listener
     bool process_packet();
     
     // Process a STARTSERVICE/STOPSERVICE packet. May throw std::bad_alloc.
-    bool process_start_stop(int pktType);
+    bool process_start_stop(cp_cmd pktType);
     
     // Process a FINDSERVICE/LOADSERVICE packet. May throw std::bad_alloc.
-    bool process_find_load(int pktType);
+    bool process_find_load(cp_cmd pktType);
+
+    // Process a CLOSEHANDLE packet.
+    bool process_close_handle();
 
     // Process an UNPINSERVICE packet. May throw std::bad_alloc.
     bool process_unpin_service();
@@ -152,8 +156,28 @@ class control_conn_t : private service_listener
     // Process a QUERYSERVICENAME packet.
     bool process_query_name();
 
+    // Process a SETENV packet.
+    bool process_setenv();
+
+    // Process a SETTRIGGER packet.
+    bool process_set_trigger();
+
+    // Process a CATLOG packet.
+    bool process_catlog();
+
+    // Process a SIGNAL packet.
+    bool process_signal();
+
+    // Process a QUERYSERVICEDSCDIR packet.
+    bool process_query_dsc_dir();
+
     // List all loaded services and their state.
     bool list_services();
+    bool list_services5();
+
+    // Query service status/
+    bool process_service_status();
+    bool process_service_status5();
 
     // Add a dependency between two services.
     bool add_service_dep(bool do_start = false);
@@ -164,22 +188,28 @@ class control_conn_t : private service_listener
     // Query service path / load mechanism.
     bool query_load_mech();
 
+    // Get the complete environment
+    bool process_getallenv();
+
+    // Listen to environment events
+    bool process_listenenv();
+
     // Notify that data is ready to be read from the socket. Returns true if the connection should
     // be closed.
     bool data_ready() noexcept;
     
     bool send_data() noexcept;
-    
+
     // Check if any dependents will be affected by stopping a service, generate a response packet if so.
     // had_dependents will be set true if the service should not be stopped, false otherwise.
     // Returns false if the connection must be closed, true otherwise.
     bool check_dependents(service_record *service, bool &had_dependents);
 
     // Allocate a new handle for a service; may throw std::bad_alloc
-    handle_t allocate_service_handle(service_record *record);
+    dinit_cptypes::handle_t allocate_service_handle(service_record *record);
     
     // Find the service corresponding to a service handle; returns nullptr if not found.
-    service_record *find_service_for_key(handle_t key) noexcept
+    service_record *find_service_for_key(dinit_cptypes::handle_t key) noexcept
     {
         try {
             return key_service_map.at(key);
@@ -194,39 +224,15 @@ class control_conn_t : private service_listener
     {
         bad_conn_close = true;
         oom_close = true;
-        iob.set_watches(dasynq::OUT_EVENTS);
     }
     
     // Process service event broadcast.
     // Note that this can potentially be called during packet processing (upon issuing
     // service start/stop orders etc).
-    void service_event(service_record * service, service_event_t event) noexcept final override
-    {
-        // For each service handle corresponding to the event, send an information packet.
-        auto range = service_key_map.equal_range(service);
-        auto & i = range.first;
-        auto & end = range.second;
-        try {
-            while (i != end) {
-                uint32_t key = i->second;
-                std::vector<char> pkt;
-                constexpr int pktsize = 3 + sizeof(key);
-                pkt.reserve(pktsize);
-                pkt.push_back(DINIT_IP_SERVICEEVENT);
-                pkt.push_back(pktsize);
-                char * p = (char *) &key;
-                for (int j = 0; j < (int)sizeof(key); j++) {
-                    pkt.push_back(*p++);
-                }
-                pkt.push_back(static_cast<char>(event));
-                queue_packet(std::move(pkt));
-                ++i;
-            }
-        }
-        catch (std::bad_alloc &exc) {
-            do_oom_close();
-        }
-    }
+    void service_event(service_record *service, service_event_t event) noexcept final override;
+
+    // Process environment event broadcast.
+    void environ_event(environment *env, std::string const &var_and_val, bool overridden) noexcept final override;
     
     public:
     control_conn_t(eventloop_t &loop, service_set * services_p, int fd)
@@ -264,6 +270,16 @@ inline dasynq::rearm control_conn_cb(eventloop_t * loop, control_conn_watcher * 
         }
     }
     
+    // Accept more commands unless the output buffer high water mark is exceeded
+    int watch_flags = 0;
+    if (!conn->bad_conn_close && conn->outbuf_size < OUTBUF_LIMIT) {
+        watch_flags |= dasynq::IN_EVENTS;
+    }
+    if (!conn->outbuf.empty() || conn->bad_conn_close) {
+        watch_flags |= dasynq::OUT_EVENTS;
+    }
+    watcher->set_watches(watch_flags);
+
     return dasynq::rearm::NOOP;
 }
 

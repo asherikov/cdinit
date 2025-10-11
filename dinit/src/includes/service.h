@@ -8,16 +8,17 @@
 #include <unordered_set>
 #include <algorithm>
 
-#include "dasynq.h"
+#include <dasynq.h>
 
-#include "dinit.h"
-#include "control.h"
-#include "service-listener.h"
-#include "service-constants.h"
-#include "load-service.h"
-#include "dinit-ll.h"
-#include "dinit-log.h"
-#include "options-processing.h" // TODO maybe remove, service_dir_pathlist can be moved?
+#include <dinit.h>
+#include <control.h>
+#include <service-listener.h>
+#include <service-constants.h>
+#include <load-service.h>
+#include <dinit-ll.h>
+#include <dinit-log.h>
+#include <service-dir.h>
+#include <dinit-env.h>
 
 /*
  * This header defines service_record, a data record maintaining information about a service,
@@ -146,6 +147,7 @@
 class service_record;
 class service_set;
 class base_process_service;
+class process_service;
 
 /* Service dependency record */
 class service_dep
@@ -166,6 +168,12 @@ class service_dep
     {
         return dep_type == dependency_type::REGULAR
                 || (dep_type == dependency_type::MILESTONE && waiting_on);
+    }
+
+    // Check if the dependency represents only an ordering constraint (not really a dependency)
+    bool is_only_ordering()
+    {
+        return (dep_type == dependency_type::BEFORE) || (dep_type == dependency_type::AFTER);
     }
 
     service_dep(service_record * from, service_record * to, dependency_type dep_type_p) noexcept
@@ -189,6 +197,11 @@ class service_dep
     {
         to = new_to;
     }
+
+    void set_from(service_record *new_from) noexcept
+    {
+        from = new_from;
+    }
 };
 
 /* preliminary service dependency information */
@@ -203,6 +216,28 @@ class prelim_dep
         // (constructor)
     }
 };
+
+// log a service load exception
+inline void log_service_load_failure(service_description_exc &exc)
+{
+    if (exc.input_pos.get_line_num() != (unsigned)-1) {
+        if (exc.setting_name == nullptr) {
+            log(loglevel_t::ERROR, "Error in service description for '", exc.service_name,
+                    "' (file ", exc.input_pos.get_file_name(), ", line ", exc.input_pos.get_line_num(), "): ",
+                    exc.exc_description);
+        }
+        else {
+            log(loglevel_t::ERROR, "Error in service description for '", exc.service_name, "': setting '", exc.setting_name, "' "
+                    "(file ", exc.input_pos.get_file_name(), ", line ", exc.input_pos.get_line_num(), "): ",
+                    exc.exc_description);
+        }
+    }
+    else {
+        // If no line number, setting name must be present
+        log(loglevel_t::ERROR, "Error in service description for '", exc.service_name, "' setting '", exc.setting_name, "': ",
+                exc.exc_description);
+    }
+}
 
 // service_record: base class for service record containing static information
 // and current state of each service.
@@ -219,7 +254,7 @@ class service_record
     
     private:
     string service_name;
-    service_type_t record_type;  // service_type_t::DUMMY, PROCESS, SCRIPTED, or INTERNAL
+    service_type_t record_type;
 
     // 'service_state' can be any valid state: STARTED, STARTING, STOPPING, STOPPED.
     // 'desired_state' is only set to final states: STARTED or STOPPED.
@@ -228,14 +263,19 @@ class service_record
 
     protected:
     service_flags_t onstart_flags;
+    
+    environment service_env; // holds the environment populated during load
+    const char *service_dsc_dir = nullptr; // directory containing service description file
 
-    string logfile;           // log file name, empty string specifies /dev/null
-    
-    bool auto_restart : 1;    // whether to restart this (process) if it dies unexpectedly
+    auto_restart_mode auto_restart; // whether to restart this (process) if it dies unexpectedly
     bool smooth_recovery : 1; // whether the service process can restart without bringing down service
-    
+
+    // Pins. Start pins are directly transitive (hence pinned_started and dept_pinned_started) whereas
+    // for stop pins, the effect is transitive since a stop-pinned service will "fail" to start anyway.
     bool pinned_stopped : 1;
     bool pinned_started : 1;
+    bool dept_pinned_started : 1; // pinned started due to dependent
+
     bool waiting_for_deps : 1;  // if STARTING, whether we are waiting for dependencies/console
                                 // if STOPPING, whether we are waiting for dependents to stop
     bool waiting_for_console : 1;   // waiting for exclusive console access (while STARTING)
@@ -248,10 +288,16 @@ class service_record
     bool prop_failure : 1;      // failure to start must be propagated
     bool prop_start   : 1;
     bool prop_stop    : 1;
+    bool prop_pin_dpt : 1;
 
     bool start_failed : 1;      // failed to start (reset when begins starting)
     bool start_skipped : 1;     // start was skipped by interrupt
     
+    bool in_auto_restart : 1;
+    bool in_user_restart : 1;
+
+    bool is_loading : 1;        // used to detect cyclic dependencies when loading a service
+
     int required_by = 0;        // number of dependents wanting this service to be started
 
     // list of dependencies
@@ -267,6 +313,8 @@ class service_record
     
     std::unordered_set<service_listener *> listeners;
     
+    process_service *log_consumer = nullptr;
+
     // Process services:
     bool force_stop; // true if the service must actually stop. This is the
                      // case if for example the process dies; the service,
@@ -275,7 +323,7 @@ class service_record
     int term_signal = SIGTERM;  // signal to use for process termination
     
     string socket_path; // path to the socket for socket-activation service
-    int socket_perms;   // socket permissions ("mode")
+    int socket_perms = 0;   // socket permissions ("mode")
     uid_t socket_uid = -1;  // socket user id or -1
     gid_t socket_gid = -1;  // socket group id or -1
 
@@ -302,7 +350,7 @@ class service_record
     // Service has successfully started
     void started() noexcept;
     
-    // Service failed to start (only called when in STARTING state).
+    // Service failed to start (should be called with state set to STOPPING or STOPPED).
     //   dep_failed: whether failure is recorded due to a dependency failing
     //   immediate_stop: whether to set state as STOPPED and handle complete stop.
     void failed_to_start(bool dep_failed = false, bool immediate_stop = true) noexcept;
@@ -334,7 +382,10 @@ class service_record
     bool stop_check_dependents() noexcept;
     
     // issue a stop to all dependents, return true if they are all already stopped
-    bool stop_dependents(bool for_restart) noexcept;
+    bool stop_dependents(bool with_restart, bool for_restart) noexcept;
+
+    // issue a restart to all hard dependents
+    bool restart_dependents() noexcept;
     
     void require() noexcept;
     void release(bool issue_stop = true) noexcept;
@@ -362,9 +413,6 @@ class service_record
     // Release console (console must be currently held by this service)
     void release_console() noexcept;
     
-    // Started state reached
-    bool process_started() noexcept;
-
     // Initiate definite startup
     void initiate_start() noexcept;
 
@@ -380,19 +428,16 @@ class service_record
         service_state = new_state;
     }
 
-    // Virtual functions, to be implemented by service implementations:
-
-    // Whether a STARTING service can transition to its STARTED state, once all
-    // dependencies have started. This should return false only if the start is interruptible
-    // at this point.
-    virtual bool can_proceed_to_start() noexcept
+    // Set the target state
+    void set_target_state(service_state_t new_target_state) noexcept
     {
-        return true;
+        desired_state = new_target_state;
     }
 
+    // Virtual functions, to be implemented by service implementations:
+
     // Do any post-dependency startup; return false on failure. Should return true if service
-    // has started or is in the process of starting. Will only be called once can_proceed_to_start()
-    // returns true.
+    // has started or is in the process of starting.
     virtual bool bring_up() noexcept;
 
     // All dependents have stopped, and this service should proceed to stop.
@@ -414,20 +459,37 @@ class service_record
     // any appropriate cleanup.
     virtual void becoming_inactive() noexcept { }
 
+    // Check whether the service should automatically restart (assuming auto_restart is ALWAYS or ON_FAILURE)
+    virtual bool check_restart() noexcept
+    {
+        return true;
+    }
+
     public:
+
+    using proc_status_t = eventloop_t::child_proc_watcher::proc_status_t;
+
+    class loading_tag_cls { };
+    static const loading_tag_cls LOADING_TAG;
 
     service_record(service_set *set, const string &name)
         : service_name(name), service_state(service_state_t::STOPPED),
-            desired_state(service_state_t::STOPPED), auto_restart(false), smooth_recovery(false),
-            pinned_stopped(false), pinned_started(false), waiting_for_deps(false),
-            waiting_for_console(false), have_console(false), waiting_for_execstat(false),
-            start_explicit(false), prop_require(false), prop_release(false), prop_failure(false),
-            prop_start(false), prop_stop(false), start_failed(false), start_skipped(false),
-            force_stop(false)
+            desired_state(service_state_t::STOPPED), auto_restart(auto_restart_mode::NEVER),
+            smooth_recovery(false), pinned_stopped(false), pinned_started(false), dept_pinned_started(false),
+            waiting_for_deps(false), waiting_for_console(false), have_console(false),
+            waiting_for_execstat(false), start_explicit(false), prop_require(false), prop_release(false),
+            prop_failure(false), prop_start(false), prop_stop(false), prop_pin_dpt(false),
+            start_failed(false), start_skipped(false), in_auto_restart(false), in_user_restart(false),
+            is_loading(false), force_stop(false)
     {
         services = set;
-        record_type = service_type_t::DUMMY;
-        socket_perms = 0;
+        record_type = service_type_t::PLACEHOLDER;
+    }
+
+    // Construct a service record and mark it as a placeholder for a loading service
+    service_record(service_set *set, const string &name, loading_tag_cls tag)
+        : service_record(set, name) {
+        is_loading = true;
     }
 
     service_record(service_set *set, const string &name, service_type_t record_type_p,
@@ -492,23 +554,28 @@ class service_record
         return start_explicit;
     }
 
-    // Set logfile, should be done before service is started
-    void set_log_file(const string &logfile)
+    // Set directory containing service description file
+    void set_service_dsc_dir(const char *dsc_dir) noexcept
     {
-        this->logfile = logfile;
+        service_dsc_dir = dsc_dir;
     }
-    
-    void set_log_file(std::string &&logfile) noexcept
+
+    const char *get_service_dsc_dir() noexcept
     {
-        this->logfile = std::move(logfile);
+        return service_dsc_dir;
+    }
+
+    void set_environment(environment &&env) noexcept
+    {
+        this->service_env = std::move(env);
     }
 
     // Set whether this service should automatically restart when it dies
-    void set_auto_restart(bool auto_restart) noexcept
+    void set_auto_restart(auto_restart_mode auto_restart) noexcept
     {
         this->auto_restart = auto_restart;
     }
-    
+
     void set_smooth_recovery(bool smooth_recovery) noexcept
     {
         this->smooth_recovery = smooth_recovery;
@@ -540,6 +607,16 @@ class service_record
         start_on_completion = std::move(chain_to);
     }
 
+    void set_log_consumer(process_service *consumer)
+    {
+        log_consumer = consumer;
+    }
+
+    process_service *get_log_consumer()
+    {
+        return log_consumer;
+    }
+
     const std::string &get_name() const noexcept { return service_name; }
     service_state_t get_state() const noexcept { return service_state; }
     
@@ -550,10 +627,7 @@ class service_record
     void forced_stop() noexcept; // force-stop this service and all dependents
     
     // Pin the service in "started" state (when it reaches the state)
-    void pin_start() noexcept
-    {
-        pinned_started = true;
-    }
+    void pin_start() noexcept;
     
     // Pin the service in "stopped" state (when it reaches the state)
     void pin_stop() noexcept
@@ -568,7 +642,7 @@ class service_record
     
     bool is_start_pinned() noexcept
     {
-        return pinned_started;
+        return pinned_started || dept_pinned_started;
     }
 
     bool is_stop_pinned() noexcept
@@ -577,9 +651,9 @@ class service_record
     }
 
     // Is this a dummy service (used only when loading a new service)?
-    bool is_dummy() noexcept
+    bool check_is_loading() noexcept
     {
-        return record_type == service_type_t::DUMMY;
+        return is_loading;
     }
     
     bool did_start_fail() noexcept
@@ -605,24 +679,42 @@ class service_record
     }
     
     // Assuming there is one reference (from a control link), return true if this is the only reference,
-    // or false if there are others (including dependents).
+    // or false if there are others (including dependents, excluding dependents via "before" and "after"
+    // links).
     bool has_lone_ref(bool check_deps = true) noexcept
     {
-        if (check_deps && ! dependents.empty()) return false;
+        if (check_deps) {
+            for (auto *dept : dependents) {
+                // BEFORE links don't count because they are actually specified via the "to" service i.e.
+                // this service. AFTER links don't count because, although they come from the dependent,
+                // they do not reflect an actual dependency, just an ordering, and this service can still
+                // be unloaded if they exist (and replaced with a placeholder).
+                if (!value(dept->dep_type).is_in(dependency_type::BEFORE, dependency_type::AFTER)) {
+                    return false;
+                }
+            }
+        }
         auto i = listeners.begin();
         return (++i == listeners.end());
     }
 
-    // Prepare this service to be unloaded.
-    void prepare_for_unload() noexcept
+    // Check whether this service has no dependents/dependencies/references that would keep it from
+    // unloading. Does not check listeners (i.e. mostly useful for placeholder services).
+    bool is_unrefd() noexcept
     {
-        // Remove all dependencies:
-        for (auto &dep : depends_on) {
-            auto &dep_dpts = dep.get_to()->dependents;
-            dep_dpts.erase(std::find(dep_dpts.begin(), dep_dpts.end(), &dep));
-        }
-        depends_on.clear();
+        return depends_on.empty() && dependents.empty() && log_consumer == nullptr;
     }
+
+    // Get fd corresponding to the read end of the pipe/socket connected to the write end used by the
+    // service process (if any). Opens the pipe if not already open; returns -1 if the service output
+    // cannot be piped (failure to open pipe, wrong service type, etc).
+    virtual int get_output_pipe_fd() noexcept
+    {
+        return -1;
+    }
+
+    // Prepare this service to be unloaded.
+    void prepare_for_unload() noexcept;
 
     // Why did the service stop?
     stopped_reason_t get_stop_reason()
@@ -645,67 +737,95 @@ class service_record
         return -1;
     }
 
-    virtual int get_exit_status()
+    virtual proc_status_t get_exit_status()
     {
-        return 0;
+        return {};
     }
 
-    dep_list & get_dependencies()
+    dep_list &get_dependencies()
     {
         return depends_on;
     }
 
-    dpt_list & get_dependents()
+    dpt_list &get_dependents()
     {
         return dependents;
     }
 
     // Add a dependency. Caller must ensure that the services are in an appropriate state and that
     // a circular dependency chain is not created. Propagation queues should be processed after
-    // calling this. May throw std::bad_alloc.
-    service_dep & add_dep(service_record *to, dependency_type dep_type)
+    // calling this (if dependency may be required to start).
+    // Parameters:
+    //   to - target of dependency to be added
+    //   dep_type - the type of the dependency
+    // Returns:
+    //   A reference to the dependency just added
+    // Throws:
+    //   std::bad_alloc.
+    service_dep &add_dep(service_record *to, dependency_type dep_type)
     {
-        return add_dep(to, dep_type, depends_on.end(), false);
+        return add_dep(to, dep_type, depends_on.end());
     }
 
     // Add a dependency. Caller must ensure that the services are in an appropriate state and that
     // a circular dependency chain is not created. Propagation queues should be processed after
-    // calling this. May throw std::bad_alloc.
+    // calling this (if dependency may be required to start).
+    // Parameters:
+    //   to - target of dependency to be added
+    //   dep_type - the type of the dependency
     //   i - where to insert the dependency (in dependencies list)
-    //   reattach - whether to acquire the required service if it and the dependent are started.
-    //             (if false, only REGULAR dependencies will cause acquire if the dependent is started,
-    //              doing so regardless of required service's state).
-    service_dep & add_dep(service_record *to, dependency_type dep_type, dep_list::iterator i, bool reattach)
+    // Returns:
+    //   A reference to the dependency just added
+    // Throws:
+    //   std::bad_alloc
+    service_dep &add_dep(service_record *to, dependency_type dep_type, dep_list::iterator i)
     {
         auto pre_i = depends_on.emplace(i, this, to, dep_type);
         try {
             to->dependents.push_back(&(*pre_i));
         }
         catch (...) {
-            depends_on.erase(i);
+            depends_on.erase(pre_i);
             throw;
         }
 
-        if (dep_type == dependency_type::REGULAR
-                || (reattach && to->get_state() == service_state_t::STARTED)) {
-            if (service_state == service_state_t::STARTING || service_state == service_state_t::STARTED) {
-                to->require();
-                pre_i->holding_acq = true;
+        if (dep_type != dependency_type::BEFORE && dep_type != dependency_type::AFTER) {
+            if (dep_type == dependency_type::REGULAR
+                    || to->get_state() == service_state_t::STARTED
+                    || to->get_state() == service_state_t::STARTING) {
+                if (service_state == service_state_t::STARTING
+                        || service_state == service_state_t::STARTED) {
+                    to->require();
+                    pre_i->holding_acq = true;
+                }
             }
         }
 
         return *pre_i;
     }
 
-    // Remove a dependency, of the given type, to the given service. Propagation queues should be processed
-    // after calling.
-    void rm_dep(service_record *to, dependency_type dep_type) noexcept
+    // Remove a dependency, of the given type, to the given service. Propagation queues should be
+    // processed after calling.
+    // Returns:
+    //   true if the specified dependency was found (and removed).
+    bool rm_dep(service_record *to, dependency_type dep_type) noexcept
     {
-        for (auto i = depends_on.begin(); i != depends_on.end(); i++) {
+        for (auto i = depends_on.begin(); i != depends_on.end(); ++i) {
             auto & dep = *i;
             if (dep.get_to() == to && dep.dep_type == dep_type) {
                 rm_dep(i);
-                break;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void rm_dep(service_dep &dep) noexcept
+    {
+        for (auto i = depends_on.begin(); i != depends_on.end(); ++i) {
+            if (&(*i) == &dep) {
+                rm_dep(i);
+                return;
             }
         }
     }
@@ -713,7 +833,7 @@ class service_record
     dep_list::iterator rm_dep(dep_list::iterator i) noexcept
     {
         auto to = i->get_to();
-        for (auto j = to->dependents.begin(); ; j++) {
+        for (auto j = to->dependents.begin(); ; ++j) {
             if (*j == &(*i)) {
                 to->dependents.erase(j);
                 break;
@@ -725,14 +845,96 @@ class service_record
         return depends_on.erase(i);
     }
 
-    // Start a speficic dependency of this service. Should only be called if this service is in an
+    // Start a specific dependency of this service. Should only be called if this service is in an
     // appropriate state (started, starting). The dependency is marked as holding acquired; when
     // this service stops, the dependency will be released and may also stop.
-    void start_dep(service_dep &dep)
+    void start_dep(service_dep &dep) noexcept
     {
-        if (! dep.holding_acq) {
+        if (!dep.holding_acq) {
             dep.get_to()->require();
             dep.holding_acq = true;
+        }
+    }
+
+    // Transfer the file descriptors representing the output (logging) pipe for this service. The file
+    // descriptors are returned as a pair (read,write) (possibly with -1,-1 if there is no log pipe open)
+    // and disassociated from this service.
+    // This is used when a process is reloaded (for example) to transfer the pipe from the original service
+    // record to the new service record.
+    virtual std::pair<int,int> transfer_output_pipe() noexcept
+    {
+        return {-1,-1};
+    }
+};
+
+class placeholder_service : public service_record {
+    int log_output_fd = -1; // write end of the output pipe
+    int log_input_fd = -1; // read end of the output pipe
+
+    public:
+    placeholder_service(service_set *set, const string &name)
+        : service_record(set, name, service_type_t::PLACEHOLDER, {}) {
+    }
+
+    int get_output_pipe_fd() noexcept override
+    {
+        if (log_input_fd != -1) {
+            return log_input_fd;
+        }
+
+        int pipefds[2];
+        if (bp_sys::pipe2(pipefds, O_CLOEXEC) == -1) {
+            log(loglevel_t::ERROR, get_name(), " (placeholder): Can't open output pipe: ", std::strerror(errno));
+            return -1;
+        }
+        log_input_fd = pipefds[0];
+        log_output_fd = pipefds[1];
+        return log_input_fd;
+    }
+
+    std::pair<int,int> transfer_output_pipe() noexcept override
+    {
+        std::pair<int,int> r { log_input_fd, log_output_fd };
+        log_input_fd = log_output_fd = -1;
+        return r;
+    }
+
+    void set_output_pipe(std::pair<int,int> fds) noexcept
+    {
+        log_input_fd = fds.first;
+        log_output_fd = fds.second;
+    }
+
+    ~placeholder_service()
+    {
+        if (log_output_fd != -1) {
+            bp_sys::close(log_output_fd);
+            bp_sys::close(log_input_fd);
+        }
+    }
+};
+
+// Externally triggered service. This is essentially the same as an internal service, but does not start
+// until the external trigger is set.
+class triggered_service : public service_record {
+    private:
+    bool is_triggered = false;
+
+    public:
+    using service_record::service_record;
+
+    bool bring_up() noexcept override;
+
+    bool can_interrupt_start() noexcept override
+    {
+        return true;
+    }
+
+    void set_trigger(bool new_trigger) noexcept
+    {
+        is_triggered = new_trigger;
+        if (is_triggered && get_state() == service_state_t::STARTING && !waiting_for_deps) {
+            started();
         }
     }
 };
@@ -787,13 +989,13 @@ class service_set
     slist<service_record, extract_stop_queue> stop_queue;
     
     public:
-    service_set()
+    service_set() noexcept
     {
         active_services = 0;
         restart_enabled = true;
     }
     
-    virtual ~service_set()
+    virtual ~service_set() noexcept
     {
         for (auto * s : records) {
             delete s;
@@ -801,21 +1003,21 @@ class service_set
     }
 
     // Start the specified service. The service will be marked active.
-    void start_service(service_record *svc)
+    void start_service(service_record *svc) noexcept
     {
         svc->start();
         process_queues();
     }
 
     // Stop the specified service. Its active mark will be cleared.
-    void stop_service(service_record *svc)
+    void stop_service(service_record *svc) noexcept
     {
         svc->stop(true);
         process_queues();
     }
 
     // Locate an existing service record.
-    service_record *find_service(const std::string &name) noexcept;
+    service_record *find_service(const std::string &name, bool find_placeholders = false) noexcept;
 
     // Load a service description, and dependencies, if there is no existing
     // record for the given name.
@@ -832,7 +1034,7 @@ class service_set
     }
 
     // Re-load a service description from file. If the service type changes then this returns
-    // a new service instead (the old one should be removed and deleted by the caller).
+    // a new service instead (the old pointer is no longer valid).
     // Throws:
     //   service_load_exc (or subclass) on problem with service description
     //   std::bad_alloc on out-of-memory condition
@@ -859,15 +1061,69 @@ class service_set
         records.push_back(svc);
     }
     
-    void remove_service(service_record *svc)
+    void remove_service(service_record *svc) noexcept
     {
         records.erase(std::find(records.begin(), records.end(), svc));
     }
 
-    void replace_service(service_record *orig, service_record *replacement)
+    void replace_service(service_record *orig, service_record *replacement) noexcept
     {
         auto i = std::find(records.begin(), records.end(), orig);
         *i = replacement;
+    }
+
+    // Unload a service, possibly replacing it with a placeholder service. This can fail with bad_alloc.
+    // svc is no longer valid on return.
+    void unload_service(service_record *svc)
+    {
+        // Check if there are any "after" dependents, or any "before" dependencies. We need a placeholder
+        // if so. Note that the placeholder is created before making any destructive changes, so if we fail
+        // to create it no rollback is needed.
+        placeholder_service *placeholder = nullptr;
+        auto make_placeholder = [&]() {
+            if (placeholder == nullptr) {
+                std::unique_ptr<placeholder_service> ph { new placeholder_service(this, svc->get_name()) };
+                add_service(ph.get());
+                placeholder = ph.release();
+            }
+        };
+
+        auto *consumer = svc->get_log_consumer();
+        if (consumer != nullptr) {
+            make_placeholder();
+            placeholder->set_output_pipe(svc->transfer_output_pipe());
+        }
+
+        auto &svc_depts = svc->get_dependents();
+        for (auto i = svc_depts.begin(); i != svc_depts.end(); ) {
+            auto *dept = *i;
+            if (dept->dep_type == dependency_type::AFTER) {
+                make_placeholder();
+                dept->set_to(placeholder);
+                auto &ph_depts = placeholder->get_dependents();
+                ph_depts.splice(ph_depts.end(), svc_depts, i++);
+                continue;
+            }
+            ++i;
+        }
+
+        auto &svc_deps = svc->get_dependencies();
+        for (auto i = svc_deps.begin(); i != svc_deps.end(); ) {
+            auto &dep = *i;
+            if (dep.dep_type == dependency_type::BEFORE) {
+                make_placeholder();
+                dep.set_from(placeholder);
+                auto &ph_deps = placeholder->get_dependencies();
+                ph_deps.splice(ph_deps.end(), svc_deps, i++);
+                continue;
+            }
+            ++i;
+        }
+
+        // Proceed with unload.
+        svc->prepare_for_unload();
+        remove_service(svc);
+        delete svc;
     }
 
     // Get the list of all loaded services.
@@ -993,7 +1249,7 @@ class service_set
 
     // Get an identifier for the run-time type of the service set (similar to typeid, but without
     // requiring RTTI to be enabled during compilation).
-    virtual int get_set_type_id()
+    virtual int get_set_type_id() noexcept
     {
         return SSET_TYPE_NONE;
     }
@@ -1024,24 +1280,29 @@ class dirload_service_set : public service_set
             const service_record *avoid_circular);
 
     public:
-    dirload_service_set() : service_set()
+    dirload_service_set() noexcept : service_set()
     {
         // nothing to do.
     }
 
-    dirload_service_set(service_dir_pathlist &&pathlist) : service_set(), service_dirs(std::move(pathlist))
+    dirload_service_set(service_dir_pathlist &&pathlist) noexcept : service_set(), service_dirs(std::move(pathlist))
     {
         // nothing to do.
+    }
+
+    dirload_service_set(const char *path, bool dyn_alloc = false)
+    {
+        service_dirs.emplace_back(path, dyn_alloc);
     }
 
     dirload_service_set(const dirload_service_set &) = delete;
 
-    int get_service_dir_count()
+    int get_service_dir_count() noexcept
     {
         return service_dirs.size();
     }
 
-    const char * get_service_dir(int n)
+    const char * get_service_dir(int n) noexcept
     {
         return service_dirs[n].get_dir();
     }
@@ -1055,7 +1316,7 @@ class dirload_service_set : public service_set
 
     service_record *reload_service(service_record *service) override;
 
-    int get_set_type_id() override
+    int get_set_type_id() noexcept override
     {
         return SSET_TYPE_DIRLOAD;
     }

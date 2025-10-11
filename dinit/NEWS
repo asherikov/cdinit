@@ -1,3 +1,438 @@
+== Version ???
+
+TBA
+
+== Version 0.19.4 (beta release #8)
+
+This release contains minor bug fixes compared to the previous release. It also adds explicit
+support for NetBSD as a platform.
+
+Thanks to current sponsors: Paweł Zmarzły (pzmarzly), Wesley Moore (wezm),
+M. Herdiansyah (konimex), Coleman McFarland (dontlaugh), q66, saolof, and private sponsors. 
+
+New features:
+ * Added explicit support for NetBSD as a platform at build time, and support shutdown on NetBSD
+   (Emile 'iMil' Heitor). (Note that shutdown is still not built by default except on Linux).
+
+Fixes:
+ * fix for a glitch where dinitctl status would incorrectly show "no error" as the reason for
+   service start failure.
+ * fix for corrupted error message for bad values for certain service settings.
+ * fix building Cgroups support even when SUPPORT_CGROUPS is set to 0 (MahnoKropotkinvich).
+
+As usual, a number of minor fixes and improvements (in addition to those already mentioned) were
+contributed by Mobin Aydinfar.
+
+== Version 0.19.3 (beta release #7)
+
+Release 0.19.1 mistakenly included in-development features (mainly, service arguments) that were
+not intended to be included in a bug-fix release. Release 0.19.2 did not include those features.
+Since distributions may be relying on the features, this release adds them back. There are a
+small number of documentation fixes and improvements also.
+
+Thanks to current sponsors: Paweł Zmarzły (pzmarzly), Wesley Moore (wezm),
+M. Herdiansyah (konimex), Coleman McFarland (dontlaugh), q66, saolof, and private sponsors. 
+
+== Version 0.19.2 (beta release #6)
+
+This beta release contains minor bugfixes compared to the prior release. It does not contain
+various feature changes that be released in version 0.20.0 in due course.
+
+Thanks to current sponsors: Paweł Zmarzły (pzmarzly), Wesley Moore (wezm),
+M. Herdiansyah (konimex), Coleman McFarland (dontlaugh), q66, saolof, and private sponsors. 
+
+Fixes:
+ * Fix bad formatting of line number in error message when a service fails to load (Jami Kettunen).
+ * Fix endianness issue leading to errors from dinitctl for some commands on big-endian systems
+   (q66).
+ * Fix dinitcheck not being able to find dependency directories ("waits-for.d" etc) if specified
+   via relative path.
+ * Dependency directories (as specified by "waits-for.d" and similar) are, if relative, now
+   resolved against the file containing the setting, rather than the base service description
+   file. It is recommended to use absolute paths for all other applicable settings.
+
+== Version 0.19.1 (beta release #5)
+
+This is a fifth beta release, containing important bugfixes compared to the prior release.
+
+Thanks again to current sponsors: Paweł Zmarzły (pzmarzly), Wesley Moore (wezm),
+M. Herdiansyah (konimex), q66, saolof, and private sponsors.
+
+With an influx of new features being contributed, a follow-up release is planned. Dinit 0.19.0 was
+not the final beta after all, and neither will be 0.19.1.
+
+Fixes:
+ * Resolve issue causing service restarts to hang (affected bgprocess and internal services).
+ * Fix handling of "depends-ms.d" service setting (q66).
+ * Bump protocol version reported by dinit so that full exit status of processes is actually
+   reported (on OSes that support it) (q66).
+ * dinitcheck warns about non-absolute executable paths in service descriptions (Yao Zi).
+
+== Version 0.19.0 (beta release #4)
+
+This is a fourth beta release, with bugfixes and some significant feature additions compared to
+the previous release. In particular, the new features focus on the ability for user customisation
+of distribution-provided services.
+
+In the absence of major bugs, the next release is expected to be 1.0.
+
+Thanks to current sponsors: Paweł Zmarzły (pzmarzly), Wesley Moore (wezm), M. Herdiansyah (konimex), q66, saolof
+
+New features:
+ * A logo for Dinit was contributed by Yakui420.
+ * Service descriptions can now include other files, via the meta-commands "@include" and
+   "@include-opt" (useful for user customisation of services).
+ * Some settings, including "command" and "stop-command", may now be appended to (useful
+   for user customisation of services).
+ * Added ability to restart process-based services only "on-failure" (Mobin Aydinfar).
+ * Service settings may span multiple lines, by "escaping" the line ending with a backslash
+   (Carlos Eduardo). 
+ * Default system-wide locations are used for user services, in addition to the user-specific
+   directory: /etc/dinit.d/user, /usr/local/lib/dinit.d/user, and /usr/lib/dinit.d/user
+   (realroot2185). 
+ * "dinitctl add-dep" now takes "need" as a dependency type in place of "regular". The latter is
+   still supported as an alias, for the time being (Locria Cyber).
+ * New "depends-on.d" and "depends-ms.d" service settings, as per "waits-for.d" but for other
+   dependency types.
+ * New "soft-reboot" utility to force restarting system services without full reboot (Yukari
+   Chiba). Note that this requires appropriately configured services. It is most likely to be
+   useful in containers.
+
+Changes:   
+ * For service restart via "dinitctl restart", display both "stopped" and "started" status
+   instead of only "started".
+ * For some service settings, where the current setting is not actually overwritten by
+   "re-assigning" the setting, the documentation now suggests using ":" to separate the setting
+   name and value (rather than "="). This has long been supported, but was not documented
+   previously.
+
+Fixes: 
+ * shutdown utility correctly changes behaviour according to name (reboot, etc) when built with a
+   name prefix (Mobin Aydinfar).
+ * fixes to control connection processing on error conditions (Mobin Aydinfar).
+ * fixed rare dinitctl hang after enabling a service (Mobin Aydinfar).
+ * fixed bug detecting invalid process id from pid file for "bgprocess" services.
+ * full ("int"-sized) exit status of processes now reported, on operating systems that support
+   this (including FreeBSD, and excluding Linux).
+
+Build fixes:
+ * Improvements to configure script, fixing some failure cases (Mobin Aydinfar).
+ * Fixes to meson build: build "poweroff" binary, install "poweroff", "reboot" and "halt" as
+   symbolic links as per Makefile build (M. Herdiansyah, aka konimex).
+ * Fixed FreeBSD makefile-based build.
+ 
+Various other changes:
+ * Reworked integration tests, CI improvements (Mobin Aydinfar), documentation improvements,
+   FreeBSD integration (see contrib/) (Locria Cyber).
+
+== Version 0.18.0 (beta release #3)
+
+This is a beta release focused on improving user experience, which also introduces some minor new
+features.
+
+Thanks to current sponsors: Paweł Zmarzły, Wesley Moore, brazeon, q66
+
+Changes:
+ * For user instances, if the XDG_CONFIG_HOME environment is set, dinit now looks for services in
+   $XDG_CONFIG_HOME/dinit.d/ in addition to $HOME/.config/dinit.d (if they are different paths).
+   Implemented by Oliver Amann.   
+   Note that Dinit does not, and most likely never will, fully support the (flawed) XDG Base
+   Directory Specification.
+
+New features:
+ * dinitcheck now supports an "online" mode of operation (--online, -n) in which it will query the
+   service directories and service manager environment from a running dinit instance.
+ * In dinit-monitor: support reporting initial service status, and using alternative
+   (user-supplied) wording for status texts. Thanks to James Knippes (helican).
+ * For service descriptions, a new form of variable expansion is available. When written as
+   "$/NAME" (or "$/{NAME}") the variable value undergoes word splitting and whitespace
+   collapse. This is convenient for allowing optional command line arguments to be specified via
+   the environment, for example.
+
+Fixes:
+ * Fix a latent control protocol processing issue (does not affect dinitctl).
+ * Various minor improvements to error messages, designed to provide a better end-user experience.
+ * Fixes to minor build issues in Meson build (Mobin Aydinfar).
+
+== Version 0.17.1 (beta release #2)
+
+This is a 2nd beta release to follow up from 0.17.0. The changes are mostly minor; they include
+some bug fixes, and some behavioural changes, that are listed below; there are also new options
+for controlling logging.
+
+New features:
+ * The console log level, and primary log facility (syslog or logfile) log level, can now be
+   specified via the new "--console-level" and "--log-level" options. See the documentation
+   in the dinit(8) man page. 
+
+Changes:
+ * The log file is opened immediately when starting even as a system manager, if possible. This
+   can make it easier to debug boot issues.
+ * The working directory for a service is now the directory containing the service description.
+   This can simplify specifying configuration files/script locations etc. Implemented by
+   q66.
+ * The env-file (environment) path for a service is now relative to the service directory
+   containing the service description. Implemented by q66.
+ * Failure to open the env-file (environment) specified for a service is now treated as a hard
+   error (and will prevent a service starting). Implemented by Mobin Aydinfar.
+ 
+Fixes:
+ * A service that restarted too often, too quickly but which was a dependency of another service
+   also set to restart did not trigger the restart limit check; this has been fixed.
+ * Process services with the smooth-recovery option and with readiness notification did not check
+   that readiness notification was received after a smooth restart.
+ * Don't report ECONNRESET errors in control connections. These indicate that the client closed
+   the connection (possibly by terminating) and do not need to be reported. This prevents a
+   spurious warning on shutdown.
+ * Give an error when a service is specified as its own output consumer (avoids crash).
+   Thanks to Mobin Aydinfar. 
+ * A better effort to make the symlink created during a "dinitctl enable" operation actually point
+   to the enabled service. (This has no effect on operation).
+ * Various command line switches which require an additional argument (eg -d, -l) now check that
+   the argument supplied is now empty.
+ * configure script improvements/fixes by Mobin Aydinfar, and by Roze061
+
+== Version 0.17.0 (beta release #1)
+
+Thank you to several new sponsors, as well as existing sponsors, for supporting this release.
+Current sponsors include github users: brentfrow, brazeon, and q66 (founder of Chimera Linux).
+Development of Dinit has also received financial support from Artix Linux.
+I am grateful for all the support, both financial and otherwise, that has been received.
+
+Special thanks to Mobin Aydinfar, who has taken on secondary maintainer duties in the lead-up to
+this release, including many valuable contributions to getting CI infrastructure up-and-running.
+
+New features:
+ * A "log-type" service setting allows for control over how a service output is processed. A new
+   "buffer" type allows capturing service output to an in-memory buffer; this may be useful for
+   service started early, before any logging daemon is available. The buffer contents can be
+   inspected via a new dinitctl subcommand, "catlog". See dinit-service(5) and dinitctl(8). Other
+   log-type settings are "none", "file" (log to file as in previous versions) and "pipe" which
+   allows piping output to another (process) service - read on for details.
+ * Output from a service process can now be chained to another process (in another service).
+   This allows one service to act as a logging agent for another, for example. The consumer
+   service need not be started at the same time as the producer process; the pipe between them can
+   be created early if needed, and will persist if either end dies (so restarting a logging agent
+   without losing log messages should be possible in theory). The "consumer-of" service setting,
+   specified in the consumer, creates the connection between the services; the producer must have
+   log-type of "pipe".
+ * New "triggered" service type, similar to "internal" except that it requires an external
+   trigger before it will start (start of a triggered service is delayed until the external
+   trigger is received). One potential use is to start services after hardware device nodes become
+   available (eg, start dhcp client on a network interface once it is available).
+ * New "dinictl" subcommand, "signal", to send a signal to a service process. See dinitctl(8).
+   Implemented by James Knippes and Mobin Aydinfar.
+ * New "kill-all-on-stop" service option will cause dinit to kill all (other) processes just
+   before stopping the service. This can be used to ensure a cleaner system state and that
+   filesystems can be unmounted (for example). Use with care; see dinit-service(5) for details.
+ * The "shutdown" utility now runs (if present) user-provided shutdown hooks; see shutdown(8) for
+   details.
+ * New service settings to control service logfile ownership and permissions: logfile-permissions,
+   logfile-uid, and logfile-gid. Note that these have default values, which results in a change in
+   behaviour from previous versions even if they are not specified in a service description (i.e.
+   the logfile ownership and permissions are now always set).
+ * A new "--offline" option for dinitctl enables using "enable" and "disable" subcommands to
+   enable/disable services when dinit is not running.
+ * "before" and "after" ordering requirements in service descriptions no longer force the named
+   service to be loaded. This means that a service can be "before" another service even if the
+   other service might not be installed, for example.
+ * New "dinitctl" subcommands "is-started" and "is-failed", to test for specific service statuses
+   (intended to be useful in scripts, for example). Contributed by q66.
+ * The "dinitctl" utility now supports the "--use-passed-cfd" argument (as for shutdown).
+ * A "configure" script to generate suitable build configuration is included. It is used by
+   default when building on not-recognised systems. Contributed by Mobin Aydinfar.
+ * Meson build system added (as an alternative to the existing makefile-based build) by Mobin
+   Aydinfar.
+
+Changes:
+ * The default is now to restart services automatically (previously required "restart = yes").
+ * The permissions/ownership for logfiles has been reworked, see details in "New features" above.
+ * Services which specify "run-as" to run as a different user now run with the supplementary
+   groups of that user (this can be disabled at build time by setting USE_INITGROUPS=0).
+   Thanks to q66.
+ * Environment variables from the service-specific environment ("env-file" setting) can now be
+   substituted in many service settings. Variable expansion now supports a limited subset of shell
+   expansions (such as "$(NAME:-word}" and "${NAME:+word}). Behaviour is not identical to shell;
+   see documentation. Implemented by q66.
+ * Environment variable expansion in service descriptions is no longer optional. The "sub-vars"
+   load option no in a service description no longer has any effect, and "no-sub-vars" is no
+   longer recognised at all.
+ * "/run/dinit.d" is now included in the default set of directories search for service description
+   files (in system mode).
+ * Some service defaults, including automatic restart, can now be configured at build time
+   (contributed by Mobin Aydinfar).
+
+Fixes:
+ * A bug in Dasynq which caused out-of-bounds vector access in dinit on shutdown has been fixed.
+ * Fixed a dinit bug that could cause communication on a control socket to block indefinitely,
+   which could theoretically cause dinitctl to hang (no cases of dinitctl hanging have been
+   reported by users!).
+
+== Version 0.16.1
+
+(Bugfix release for 0.16.0)
+
+This release contains bug fixes for the previous release.
+
+Changes:
+ * Fix issue where dependencies could stop before there dependents had stopped.
+ * Fix issue where startup could fail if control socket location was not writable when
+   dinit started.
+ * Fix for dinitctl crashing due to an exception when a service description contained
+   certain syntactical errors.
+ * Fix nonsensical (but harmless) error message when loading services (when the service
+   description is found in a directory that is not the first directory searched)
+   (q66).
+ * Fix issue with example rootfscheck.sh script (Mobin Aydinfar).
+ * Minor build system improvements (q66).
+ * Minor documentation updates.
+
+== Version 0.16.0
+
+(Alpha release #8)
+
+This release contains some new features and bug fixes.
+
+Changes:
+ * "before" and "after" relationships can now be specified for services. These can be used to
+   control startup order without creating explicit dependencies between services.
+ * The "restart" command of dinitctl will now also restart hard dependents if the "--force"
+   option is used (previously the "--force" option was ignored, and the command would fail if
+   a dependent blocked the restart). Changes contributed by Duncan Overbruck.
+ * The "-t" (or "--service") command-line option has been implemented to allow unambiguously
+   specifying that the next argument is a service name. This can be used when booting Linux to
+   select a target service or services (dinit otherwise ignores potential service names in this
+   scenario, since the Linux kernel sometimes passes through kernel options to init).
+   Implemented by Mobin Aydinfar.
+ * The dinit daemon itself supports S6-compatible readiness notification (for when run under
+   another supervision system or controlling process). The "-r <fd>" command line argument
+   specifies the file descriptor to write the notification to. Contributed by q66.
+ * Environment files (including per-service file as specified by env-file service setting):
+   support for commands !clear, !unset and !import. These give more flexibility in how much of the
+   original environment to expose to service processes. See the dinit(8) man page for more
+   information.
+ * The dinitctl utility provides more information if a service fails to start (avoiding the need
+   to query the status separately or check logs to get the same information).
+ * Fix bug with cgroup root path extraction where the path was longer than 64 characters (found
+   by Github continuous integration builds as implemented by Mobin Aydinfar).
+ * Fix bad pointer bug manifesting with very short command strings (reported by Duncan Overbruck).
+ * Reloading a service now checks for (and disallows) cyclic dependencies.
+ * Minor fix to service examples, contributed by Firas Khalil Khana.
+ * Various minor build/install fixes.
+
+Other:
+ * Github continuous integration was set up by Mobin Aydinfar 
+ 
+== Version 0.15.1
+
+(Alpha release #7)
+
+This contains minor fixes for the previous release.
+
+Changes:
+ * Remove extra newline which was printed after service description error log messages.
+ * Install dinit-monitor as part of "make install".
+
+== Version 0.15.0
+
+(Alpha release #6)
+
+This release contains bug fixes and new features.
+
+Changes:
+ * New "dinit-monitor" command can be used to perform notifications (via an external command, such
+   as notify-send) when a service changes state. This is primarily intended for users running dinit
+   in "user mode" rather than for system instances of dinit, although it works in either case. See
+   the dinit-monitor(8) manual page for details.
+ * Support on Linux for running service processes in a cgroup, via the "runs-in-cgroup" service
+   setting. Cgroups must be mounted/created outside of dinit (eg via an early service), there is no
+   support for this in dinit itself. See the dinit-service(5) manual page for details.
+ * "dinitctl enable", "dinitctl disable" and "dinitctl rmdep" now give better feedback in various
+   situations. For example, "dinitctl disable" will warn if a disabled service has other
+   dependents (which may cause it to start anyway).
+ * When parse errors occur in service description files, the relevant line number should now be
+   reported (by dinitcheck, or in the dinit log).
+ * Environment variable substitution in command lines is now performed for the "stop-command"
+   setting in exactly the same way as for the "command" setting. Previously, by oversight,
+   substitution was not performed for the "stop-command" setting.
+ * Fix: start timeout was not being honoured for service restarts.
+
+== Version 0.14.0
+
+(Alpha release #5)
+
+This release contains bug fixes and a new feature.
+
+Changes:
+ * "stop-command" service parameter can now be applied to process and bgprocess services. If
+   specified for these service types, the specified command is used to stop the service.
+ * "dinitctl status" now reports launch stage and error for services which failed to execute.
+   Example output:
+   
+       $ src/dinitctl status mpd
+       Service: mpd
+           State: STOPPED (could not be launched)
+               Stage: executing command
+               Error: No such file or directory
+   
+ * Fixes bug where "dinitctl status" command would sometimes report an error.
+ * Fixes a (situational, unlikely) bug where a bgprocess state could get stuck.
+ * Fixes a potential memory corruption / crash bug occurring in out-of-memory situations when
+   adding a dependency to a service (via "dinitctl reload" or "dinitctl add-dep").
+
+== Version 0.13.0
+
+NOTE: This release has some minor backwards-incompatible changes. Please read
+these notes carefully.
+
+This release includes changes contributed by q66.
+
+Changes:
+ * A new dinitctl subcommand, "status", can be used to query extended status
+   information for an individual service.
+ * The default directory for user services has moved to ~/.config/dinit.d
+   (rather than ~/dinit.d).
+ * Some service settings now expand environment variables (given in the form
+   $VARNAME, in any location that it appears within the setting value). The
+   affected settings are: socket_path, logfile, env_file, working_dir and
+   pid_file.
+ * The variable substitution in command lines (which remains dependent on the
+   'sub-vars' load option, for now) uses the same substitution rules and logic
+   as for other settings. In particular, this means that a variable expansion
+   can occur as part of a command line argument (previously it always replaced
+   whole arguments). 
+ * The dinitctl program now uses the value of the DINIT_SOCKET_PATH
+   environment variable, if set, as the default control socket path. (If not
+   set, behaviour is the same as for previous versions).
+ * A "poweroff" symlink for shutdown will be installed alongside other symlinks
+   ("reboot", "halt" etc). This allows integration in environments that expect
+   such a command to be available.
+
+== Version 0.12.0
+
+This is the third Alpha release, issued as a follow-up to the previous Alpha
+releases. It contains a number of minor improvements.
+
+Changes:
+ * A new "--ignore-unstarted" option to dinitctl, causing it to return success
+   when attempting to restart a service which is not started (including when
+   no service description for it exists).
+ * Add an "always-chain" service option, so that chaining to another service
+   (as specified via the "chain-to" setting) becomes unconditional.
+   Feature contributed by Alexander Sherikov.
+ * Add support for multiple service directories to be specified (via multiple
+   --services-dir options).
+   Feature contributed by Alexander Sherikov.
+ * Improve control socket creation / stale socket removal. Previously, a
+   system instance would unconditionally unlink a pre-existing socket file,
+   and non-system instances would fail if a pre-existing socket file existed
+   (even if it was not active, i.e. no dinit instance was accepting
+   connections on it). Now, if there is an existing socket file, dinit will
+   attempt to connect to it, and will refuse to start if this succeeds, or
+   unlink it otherwise. Unfortunately this cannot be done atomically, so it
+   should not be relied on as a general means to prevent more than one
+   instance of dinit from starting.
+
 == Version 0.11.0
 
 This is a second Alpha release, issued as a follow-up to the previous Alpha

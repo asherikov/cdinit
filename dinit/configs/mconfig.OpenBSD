@@ -1,3 +1,5 @@
+# Default build configuration for OpenBSD.
+
 # Installation path options.
 
 SBINDIR=/sbin
@@ -9,11 +11,22 @@ SYSCONTROLSOCKET=/var/run/dinitctl
 
 # OpenBSD, tested with GCC 4.9.3 / Clang++ 4/5 and gmake:
 CXX=clang++
-CXXOPTS=-std=c++11 -Os -Wall -fno-rtti
-LDFLAGS=
+CXXFLAGS=-std=c++11 -Os -Wall -fno-rtti
+CPPFLAGS=
+LDFLAGS_BASE=
+LDFLAGS=$(LDFLAGS_BASE)
+TEST_CXXFLAGS=$(CXXFLAGS)
+TEST_LDFLAGS_BASE=$(LDFLAGS_BASE)
+TEST_LDFLAGS=$(TEST_LDFLAGS_BASE)
 BUILD_SHUTDOWN=no
-SANITIZEOPTS=
 # (shutdown command not available for OpenBSD yet).
 
 # Notes:
 #   -fno-rtti (optional) : Dinit does not require C++ Run-time Type Information
+
+
+# Service defaults.
+
+DEFAULT_AUTO_RESTART=ALWAYS
+DEFAULT_START_TIMEOUT=60
+DEFAULT_STOP_TIMEOUT=10

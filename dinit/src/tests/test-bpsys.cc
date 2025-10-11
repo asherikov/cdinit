@@ -5,23 +5,25 @@
 #include <map>
 
 #include <cstdlib>
+#include <cstring>
 #include <cerrno>
 
 #include "baseproc-sys.h"
 
 namespace {
 
+// which simulated file descriptors are currently "open"
 std::vector<bool> usedfds = {true, true, true};
 
 struct read_result
 {
-	read_result(int errcode_p) : errcode(errcode_p) {}
+    read_result(int errcode_p) : errcode(errcode_p) {}
 
-	read_result(std::vector<char> &data_p) : errcode(0), data(data_p) {}
-	read_result(std::vector<char> &&data_p) : errcode(0), data(std::move(data_p)) {}
+    read_result(std::vector<char> &data_p) : errcode(0), data(data_p) {}
+    read_result(std::vector<char> &&data_p) : errcode(0), data(std::move(data_p)) {}
 
-	int errcode; // errno return
-	std::vector<char> data;  // data (if errcode == 0)
+    int errcode; // errno return
+    std::vector<char> data;  // data (if errcode == 0)
 };
 
 class read_cond : public std::vector<read_result>
@@ -42,9 +44,14 @@ std::map<int, std::unique_ptr<bp_sys::write_handler>> write_hndlr_map;
 // map of path to file content
 std::map<std::string, std::vector<char>> file_content_map;
 
+// environment variables, in "NAME=VALUE" form
+std::vector<char *> env_vars;
+
 } // anon namespace
 
 namespace bp_sys {
+
+char **environ = nullptr;
 
 int last_sig_sent = -1; // last signal number sent, accessible for tests.
 pid_t last_forked_pid = 1;  // last forked process id (incremented each 'fork')
@@ -83,12 +90,12 @@ int allocfd(write_handler *whndlr)
 // Supply data to be returned by read()
 void supply_read_data(int fd, std::vector<char> &data)
 {
-	read_data[fd].emplace_back(data);
+    read_data[fd].emplace_back(data);
 }
 
 void supply_read_data(int fd, std::vector<char> &&data)
 {
-	read_data[fd].emplace_back(std::move(data));
+    read_data[fd].emplace_back(std::move(data));
 }
 
 void set_blocking(int fd)
@@ -102,7 +109,7 @@ void extract_written_data(int fd, std::vector<char> &data)
     auto &whandler = write_hndlr_map[fd];
     if (whandler == nullptr) abort();
     default_write_handler *dwhndlr = static_cast<default_write_handler *>(whandler.get());
-	data = std::move(dwhndlr->data);
+    data = std::move(dwhndlr->data);
 }
 
 // Supply a file content
@@ -156,38 +163,38 @@ int kill(pid_t pid, int sig)
 
 ssize_t read(int fd, void *buf, size_t count)
 {
-	read_cond & rrs = read_data[fd];
-	if (rrs.empty()) {
-	    if (rrs.is_blocking) {
-	        errno = EAGAIN;
-	        return -1;
-	    }
-		return 0;
-	}
+    read_cond & rrs = read_data[fd];
+    if (rrs.empty()) {
+        if (rrs.is_blocking) {
+            errno = EAGAIN;
+            return -1;
+        }
+        return 0;
+    }
 
-	read_result &rr = rrs.front();
-	if (rr.errcode != 0) {
-		errno = rr.errcode;
-		// Remove the result record:
-		auto i = rrs.begin();
-		i++;
-		rrs.erase(rrs.begin(), i);
-		return -1;
-	}
+    read_result &rr = rrs.front();
+    if (rr.errcode != 0) {
+        errno = rr.errcode;
+        // Remove the result record:
+        auto i = rrs.begin();
+        i++;
+        rrs.erase(rrs.begin(), i);
+        return -1;
+    }
 
-	auto dsize = rr.data.size();
-	if (dsize <= count) {
-		// Consume entire result:
-		std::copy_n(rr.data.begin(), dsize, (char *)buf);
-		// Remove the result record:
-		rrs.erase(rrs.begin());
-		return dsize;
-	}
+    auto dsize = rr.data.size();
+    if (dsize <= count) {
+        // Consume entire result:
+        std::copy_n(rr.data.begin(), dsize, (char *)buf);
+        // Remove the result record:
+        rrs.erase(rrs.begin());
+        return dsize;
+    }
 
-	// Consume partial result:
-	std::copy_n(rr.data.begin(), count, (char *)buf);
-	rr.data.erase(rr.data.begin(), rr.data.begin() + count);
-	return count;
+    // Consume partial result:
+    std::copy_n(rr.data.begin(), count, (char *)buf);
+    rr.data.erase(rr.data.begin(), rr.data.begin() + count);
+    return count;
 }
 
 ssize_t write(int fd, const void *buf, size_t count)
@@ -212,6 +219,62 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt)
         }
     }
     return r;
+}
+
+char *getenv(const char *name)
+{
+    size_t name_len = strlen(name);
+    for (auto *var : env_vars) {
+        if (strncmp(name, var, name_len) == 0) {
+            if (var[name_len] == '=') {
+                return &(var[name_len + 1]);
+            }
+        }
+    }
+    return nullptr;
+}
+
+int setenv(const char *name, const char *value, int overwrite)
+{
+    size_t name_len = strlen(name);
+    if (env_vars.empty()) {
+        env_vars.push_back(nullptr);
+    }
+    else for (unsigned i = 0; i < (env_vars.size() - 1); ++i) {
+        if (strncmp(name, env_vars[i], name_len) == 0) {
+            if (env_vars[i][name_len] == '=') {
+                // name matches, replace the value
+                if (overwrite) {
+                    delete[](env_vars[i]);
+                    env_vars[i] = new char[name_len + 1 + strlen(value) + 1];
+                    strcpy(env_vars[i], name);
+                    env_vars[i][name_len] = '=';
+                    strcpy(env_vars[i] + name_len + 1, value);
+                }
+                return 0;
+            }
+        }
+    }
+
+    // not found, add
+    char *new_var = new char[name_len + 1 + strlen(value) + 1];
+    strcpy(new_var, name);
+    new_var[name_len] = '=';
+    strcpy(new_var + name_len + 1, value);
+    env_vars[env_vars.size() - 1] = new_var;
+    env_vars.push_back(nullptr);
+    environ = env_vars.data();
+    return 0;
+}
+
+int clearenv()
+{
+    for (char *env_var : env_vars) {
+        delete[](env_var);
+    }
+    env_vars.clear();
+    environ = nullptr;
+    return 0;
 }
 
 }

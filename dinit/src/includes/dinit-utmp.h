@@ -3,7 +3,7 @@
 #ifndef DINIT_UTMP_H_INCLUDED
 #define DINIT_UTMP_H_INCLUDED
 
-#include "mconfig.h"  // pull in any explicit configuration
+#include <mconfig.h>  // pull in any explicit configuration
 
 // Configuration:
 // USE_UTMPX - whether to update the utmp[x] database. If 0, no-op stubs are defined.
@@ -36,7 +36,7 @@
 #if __linux__
 #define CLEAR_UTMP_ON_BOOT 1
 #else
-#define CLEAR UTMP_ON_BOOT 0
+#define CLEAR_UTMP_ON_BOOT 0
 #endif
 #endif
 
@@ -153,12 +153,12 @@ inline void clear_utmp_entry(const char *utmp_id, const char *utmp_line)
 
 #else // Don't update databases:
 
-static inline bool log_boot()
+inline bool log_boot()
 {
     return true;
 }
 
-static inline bool create_utmp_entry(const char *utmp_id, const char *utmp_line)
+inline bool create_utmp_entry(const char *utmp_id, const char *utmp_line)
 {
     return true;
 }

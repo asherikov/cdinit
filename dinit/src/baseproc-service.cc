@@ -22,7 +22,7 @@
 
 void base_process_service::do_smooth_recovery() noexcept
 {
-    if (! restart_ps_process()) {
+    if (!restart_ps_process()) {
         unrecoverable_stop();
         services->process_queues();
     }
@@ -34,23 +34,31 @@ bool base_process_service::bring_up() noexcept
         return false;
     }
 
-    restart_interval_count = 0;
-    if (start_ps_process(exec_arg_parts,
-            onstart_flags.starts_on_console || onstart_flags.shares_console)) {
+    bool start_success;
+    if (in_auto_restart) {
+        start_success = restart_ps_process();
+    }
+    else {
+        restart_interval_count = 0;
+        start_success = start_ps_process(exec_arg_parts,
+                onstart_flags.starts_on_console || onstart_flags.shares_console);
         // start_ps_process updates last_start_time, use it also for restart_interval_time:
         restart_interval_time = last_start_time;
-        if (start_timeout != time_val(0,0)) {
-            process_timer.arm_timer_rel(event_loop, start_timeout);
-            waiting_stopstart_timer = true;
+
+        // Arm start timer. (For restarts, this is only done once the restart interval expires).
+        if (start_success) {
+            if (start_timeout != time_val(0,0)) {
+                process_timer.arm_timer_rel(event_loop, start_timeout);
+                waiting_stopstart_timer = true;
+            }
+            else if (waiting_stopstart_timer) {
+                process_timer.stop_timer(event_loop);
+                waiting_stopstart_timer = false;
+            }
         }
-        else if (waiting_stopstart_timer) {
-            process_timer.stop_timer(event_loop);
-            waiting_stopstart_timer = false;
-        }
-        return true;
     }
-    restart_interval_time = last_start_time;
-    return false;
+
+    return start_success;
 }
 
 void base_process_service::handle_unexpected_termination() noexcept
@@ -65,27 +73,19 @@ void base_process_service::handle_unexpected_termination() noexcept
     //    the usual start_ps_process (the usual bring-up).
     // But we need to issue a forced stop and process queues, to discover our eventual target
     // state (so we know whether we actually want to restart or not).
+    // Note we can't call forced_stop() directly here, because we need to set in_auto_restart in
+    // between do_stop() and processing queues (so that it is set correctly if restart occurs):
 
-    delay_start = true; // inhibit bring-up temporarily
-
-    forced_stop();
+    force_stop = true;
+    do_stop();
     services->process_queues();
 
-    delay_start = false;
-
-    // It's possible we have no dependents or they stopped immediately, in which case we
-    // either are STOPPED or STARTING. Otherwise, let's stop immediately (and potentially
-    // restart immediately):
-
     if (get_state() == service_state_t::STOPPING) {
-        stopped();  // this might cause us to restart, i.e. state may be STARTING
-    }
-
-    // Finally, if we're now STARTING, that means we should restart
-
-    if (get_state() == service_state_t::STARTING) {
-        if (!restart_ps_process()) {
-            failed_to_start();
+        // We must be waiting for dependents;
+        // If we're going to restart, we can kick that off now:
+        if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
+            initiate_start();
+            services->process_queues();
         }
     }
 }
@@ -105,126 +105,218 @@ bool base_process_service::start_ps_process(const std::vector<const char *> &cmd
         return false;
     }
 
-    const char * logfile = this->logfile.c_str();
-    if (*logfile == 0) {
-        logfile = "/dev/null";
+    int input_fd;
+    if (!get_input_fd(&input_fd)) {
+        return false;
     }
 
-    bool child_status_registered = false;
-    control_conn_t *control_conn = nullptr;
+    const char * logfile = this->logfile.c_str();
+    if (this->log_type == log_type_id::LOGFILE || this->log_type == log_type_id::NONE) {
+        // Note: if log_type == NONE, logfile should be empty.
+        if (*logfile == 0) {
+            logfile = "/dev/null";
+        }
+    }
+    else /* log_type_id::BUFFER or ::PIPE */ {
+        if (this->log_output_fd == -1) {
+            int logfd[2];
+            // Note: we set CLOEXEC on the file descriptors here; when the output file descriptor is dup'd
+            // to stdout, this will be effectively removed for the output end
+            if (bp_sys::pipe2(logfd, O_CLOEXEC)) {
+                log(loglevel_t::ERROR, get_name(), ": can't create output pipe: ", strerror(errno));
+                goto out_p;
+            }
+            this->log_input_fd = logfd[0];
+            this->log_output_fd = logfd[1];
+            if (this->log_type == log_type_id::BUFFER) {
+                try {
+                    this->log_output_listener.add_watch(event_loop, logfd[0], dasynq::IN_EVENTS,
+                            false /* not enabled */);
+                }
+                catch (...) {
+                    log(loglevel_t::ERROR, get_name(), ": can't add output watch (insufficient resources)");
+                    bp_sys::close(this->log_input_fd);
+                    bp_sys::close(this->log_output_fd);
+                    this->log_input_fd = -1;
+                    this->log_output_fd = -1;
+                    goto out_p;
+                }
+            }
+        }
+        // (More is done below, after we have performed additional setup)
+    }
 
-    int control_socket[2] = {-1, -1};
-    int notify_pipe[2] = {-1, -1};
-    bool have_notify = !notification_var.empty() || force_notification_fd != -1;
-    ready_notify_watcher * rwatcher = have_notify ? get_ready_watcher() : nullptr;
-    bool ready_watcher_registered = false;
+    {
+        bool child_status_registered = false;
+        control_conn_t *control_conn = nullptr;
 
-    if (onstart_flags.pass_cs_fd) {
-        if (dinit_socketpair(AF_UNIX, SOCK_STREAM, /* protocol */ 0, control_socket, SOCK_NONBLOCK)) {
-            log(loglevel_t::ERROR, get_name(), ": can't create control socket: ", strerror(errno));
-            goto out_p;
+        int control_socket[2] = {-1, -1};
+        int notify_pipe[2] = {-1, -1};
+        bool have_notify = !notification_var.empty() || force_notification_fd != -1;
+        ready_notify_watcher * rwatcher = have_notify ? get_ready_watcher() : nullptr;
+        bool ready_watcher_registered = false;
+
+        if (onstart_flags.pass_cs_fd) {
+            if (dinit_socketpair(AF_UNIX, SOCK_STREAM, /* protocol */ 0, control_socket, SOCK_NONBLOCK)) {
+                log(loglevel_t::ERROR, get_name(), ": can't create control socket: ", strerror(errno));
+                goto out_lfd;
+            }
+
+            // Make the server side socket close-on-exec:
+            int fdflags = bp_sys::fcntl(control_socket[0], F_GETFD);
+            bp_sys::fcntl(control_socket[0], F_SETFD, fdflags | FD_CLOEXEC);
+
+            try {
+                control_conn = new control_conn_t(event_loop, services, control_socket[0]);
+            }
+            catch (std::exception &exc) {
+                log(loglevel_t::ERROR, get_name(), ": can't launch process; out of memory");
+                goto out_cs;
+            }
         }
 
-        // Make the server side socket close-on-exec:
-        int fdflags = bp_sys::fcntl(control_socket[0], F_GETFD);
-        bp_sys::fcntl(control_socket[0], F_SETFD, fdflags | FD_CLOEXEC);
+        if (have_notify) {
+            // Create a notification pipe:
+            if (bp_sys::pipe2(notify_pipe, 0) != 0) {
+                log(loglevel_t::ERROR, get_name(), ": can't create notification pipe: ", strerror(errno));
+                goto out_cs_h;
+            }
+
+            // Set the read side as close-on-exec:
+            int fdflags = bp_sys::fcntl(notify_pipe[0], F_GETFD);
+            bp_sys::fcntl(notify_pipe[0], F_SETFD, fdflags | FD_CLOEXEC);
+
+            // add, but don't yet enable, readiness watcher:
+            try {
+                rwatcher->add_watch(event_loop, notify_pipe[0], dasynq::IN_EVENTS, false);
+                ready_watcher_registered = true;
+            }
+            catch (std::exception &exc) {
+                log(loglevel_t::ERROR, get_name(), ": can't add notification watch: ", exc.what());
+                goto out_cs_h;
+            }
+        }
+
+        if (log_type == log_type_id::BUFFER) {
+            // Set watcher enabled if space in buffer
+            if (log_buf_size > 0) {
+                // Append a "restarted" message to buffer contents
+                const char *restarting_msg = "\n(dinit: note: service restarted)\n";
+                unsigned restarting_msg_len = strlen(restarting_msg);
+                bool trailing_nl = log_buffer[log_buf_size - 1] == '\n';
+                if (trailing_nl) {
+                    ++restarting_msg; // trim leading newline
+                    --restarting_msg_len;
+                }
+                if (log_buf_size + restarting_msg_len >= log_buf_max) {
+                    goto skip_enable_log_watch;
+                }
+                if (!ensure_log_buffer_backing(log_buf_size + restarting_msg_len)) {
+                    goto skip_enable_log_watch;
+                }
+                memcpy(log_buffer.data() + log_buf_size, restarting_msg, restarting_msg_len);
+                log_buf_size += restarting_msg_len;
+            }
+            log_output_listener.set_enabled(event_loop, true);
+        }
+        skip_enable_log_watch: ;
+
+        // Set up complete, now fork and exec:
+
+        pid_t forkpid;
 
         try {
-            control_conn = new control_conn_t(event_loop, services, control_socket[0]);
-        }
-        catch (std::exception &exc) {
-            log(loglevel_t::ERROR, get_name(), ": can't launch process; out of memory");
-            goto out_cs;
-        }
-    }
+            child_status_listener.add_watch(event_loop, pipefd[0], dasynq::IN_EVENTS);
+            child_status_registered = true;
 
-    if (have_notify) {
-        // Create a notification pipe:
-        if (bp_sys::pipe2(notify_pipe, 0) != 0) {
-            log(loglevel_t::ERROR, get_name(), ": can't create notification pipe: ", strerror(errno));
+            // We specify a high priority (i.e. low priority value) so that process termination is
+            // handled early. This means we have always recorded that the process is terminated by the
+            // time that we handle events that might otherwise cause us to signal the process, so we
+            // avoid sending a signal to an invalid (and possibly recycled) process ID.
+            forkpid = child_listener.fork(event_loop, reserved_child_watch, dasynq::DEFAULT_PRIORITY - 10);
+            reserved_child_watch = true;
+        }
+        catch (std::exception &e) {
+            log(loglevel_t::ERROR, get_name(), ": could not fork: ", e.what());
             goto out_cs_h;
         }
 
-        // Set the read side as close-on-exec:
-        int fdflags = bp_sys::fcntl(notify_pipe[0], F_GETFD);
-        bp_sys::fcntl(notify_pipe[0], F_SETFD, fdflags | FD_CLOEXEC);
-
-        // add, but don't yet enable, readiness watcher:
-        try {
-            rwatcher->add_watch(event_loop, notify_pipe[0], dasynq::IN_EVENTS, false);
-            ready_watcher_registered = true;
+        if (forkpid == 0) {
+            const char * working_dir_c = service_dsc_dir;
+            if (!working_dir.empty()) working_dir_c = working_dir.c_str();
+            after_fork(getpid());
+            run_proc_params run_params{cmd.data(), working_dir_c, logfile, pipefd[1], run_as_uid, run_as_gid, rlimits};
+            run_params.on_console = on_console;
+            run_params.in_foreground = !onstart_flags.shares_console;
+            run_params.unmask_sigint = onstart_flags.unmask_intr;
+            run_params.csfd = control_socket[1];
+            run_params.socket_fd = socket_fd;
+            run_params.notify_fd = notify_pipe[1];
+            run_params.force_notify_fd = force_notification_fd;
+            run_params.notify_var = notification_var.c_str();
+            run_params.env_file = env_file.c_str();
+            run_params.output_fd = log_output_fd;
+            run_params.input_fd = input_fd;
+            run_params.nice_is_set = nice_is_set;
+            run_params.nice = nice;
+            #if SUPPORT_CGROUPS
+            run_params.run_in_cgroup = run_in_cgroup.c_str();
+            #endif
+            #if SUPPORT_CAPABILITIES
+            run_params.cap_iab = cap_iab.get();
+            run_params.secbits = secbits;
+            run_params.no_new_privs = onstart_flags.no_new_privs;
+            #endif
+            #if SUPPORT_IOPRIO
+            run_params.ioprio = ioprio;
+            #endif
+            #if SUPPORT_OOM_ADJ
+            run_params.oom_adj_is_set = oom_adj_is_set;
+            run_params.oom_adj = oom_adj;
+            #endif
+            run_child_proc(run_params);
         }
-        catch (std::exception &exc) {
-            log(loglevel_t::ERROR, get_name(), ": can't add notification watch: ", exc.what());
+        else {
+            // Parent process
+            pid = forkpid;
+
+            bp_sys::close(pipefd[1]); // close the 'other end' fd
+            if (control_socket[1] != -1) bp_sys::close(control_socket[1]);
+            if (notify_pipe[1] != -1) bp_sys::close(notify_pipe[1]);
+            notification_fd = notify_pipe[0];
+            waiting_for_execstat = true;
+            return true;
         }
-    }
 
-    // Set up complete, now fork and exec:
+        // Failure exit:
 
-    pid_t forkpid;
+        out_cs_h:
+        if (child_status_registered) {
+            child_status_listener.deregister(event_loop);
+        }
 
-    try {
-        child_status_listener.add_watch(event_loop, pipefd[0], dasynq::IN_EVENTS);
-        child_status_registered = true;
-
-        // We specify a high priority (i.e. low priority value) so that process termination is
-        // handled early. This means we have always recorded that the process is terminated by the
-        // time that we handle events that might otherwise cause us to signal the process, so we
-        // avoid sending a signal to an invalid (and possibly recycled) process ID.
-        forkpid = child_listener.fork(event_loop, reserved_child_watch, dasynq::DEFAULT_PRIORITY - 10);
-        reserved_child_watch = true;
-    }
-    catch (std::exception &e) {
-        log(loglevel_t::ERROR, get_name(), ": could not fork: ", e.what());
-        goto out_cs_h;
-    }
-
-    if (forkpid == 0) {
-        const char * working_dir_c = nullptr;
-        if (! working_dir.empty()) working_dir_c = working_dir.c_str();
-        after_fork(getpid());
-        run_proc_params run_params{cmd.data(), working_dir_c, logfile, pipefd[1], run_as_uid, run_as_gid, rlimits};
-        run_params.on_console = on_console;
-        run_params.in_foreground = !onstart_flags.shares_console;
-        run_params.csfd = control_socket[1];
-        run_params.socket_fd = socket_fd;
-        run_params.notify_fd = notify_pipe[1];
-        run_params.force_notify_fd = force_notification_fd;
-        run_params.notify_var = notification_var.c_str();
-        run_params.env_file = env_file.c_str();
-        run_child_proc(run_params);
-    }
-    else {
-        // Parent process
-        pid = forkpid;
-
-        bp_sys::close(pipefd[1]); // close the 'other end' fd
-        if (control_socket[1] != -1) bp_sys::close(control_socket[1]);
+        if (notify_pipe[0] != -1) bp_sys::close(notify_pipe[0]);
         if (notify_pipe[1] != -1) bp_sys::close(notify_pipe[1]);
-        notification_fd = notify_pipe[0];
-        waiting_for_execstat = true;
-        return true;
+        if (ready_watcher_registered) {
+            rwatcher->deregister(event_loop);
+        }
+
+        if (onstart_flags.pass_cs_fd) {
+            delete control_conn;
+
+            out_cs:
+            bp_sys::close(control_socket[0]);
+            bp_sys::close(control_socket[1]);
+        }
     }
 
-    // Failure exit:
-
-    out_cs_h:
-    if (child_status_registered) {
-        child_status_listener.deregister(event_loop);
-    }
-
-    if (notify_pipe[0] != -1) bp_sys::close(notify_pipe[0]);
-    if (notify_pipe[1] != -1) bp_sys::close(notify_pipe[1]);
-    if (ready_watcher_registered) {
-        rwatcher->deregister(event_loop);
-    }
-
-    if (onstart_flags.pass_cs_fd) {
-        delete control_conn;
-
-        out_cs:
-        bp_sys::close(control_socket[0]);
-        bp_sys::close(control_socket[1]);
+    out_lfd:
+    if (log_input_fd != -1) {
+        log_output_listener.deregister(event_loop);
+        bp_sys::close(log_input_fd);
+        bp_sys::close(log_output_fd);
+        log_input_fd = -1;
+        log_output_fd = -1;
     }
 
     out_p:
@@ -235,11 +327,11 @@ bool base_process_service::start_ps_process(const std::vector<const char *> &cmd
 }
 
 base_process_service::base_process_service(service_set *sset, string name,
-        service_type_t service_type_p, string &&command,
+        service_type_t service_type_p, ha_string &&command,
         const std::list<std::pair<unsigned,unsigned>> &command_offsets,
         const std::list<prelim_dep> &deplist_p)
      : service_record(sset, name, service_type_p, deplist_p), child_listener(this),
-       child_status_listener(this), process_timer(this)
+       child_status_listener(this), process_timer(this), log_output_listener(this)
 {
     program_name = std::move(command);
     exec_arg_parts = separate_args(program_name, command_offsets);
@@ -256,7 +348,6 @@ base_process_service::base_process_service(service_set *sset, string name,
 
     waiting_restart_timer = false;
     waiting_stopstart_timer = false;
-    delay_start = false;
     reserved_child_watch = false;
     tracking_child = false;
 }
@@ -267,10 +358,9 @@ void base_process_service::do_restart() noexcept
     // be a regular restart.
 
     waiting_restart_timer = false;
-    restart_interval_count++;
     auto service_state = get_state();
 
-    if (! start_ps_process(exec_arg_parts, have_console || onstart_flags.shares_console)) {
+    if (!start_ps_process(exec_arg_parts, have_console || onstart_flags.shares_console)) {
         if (service_state == service_state_t::STARTING) {
             failed_to_start();
         }
@@ -280,6 +370,13 @@ void base_process_service::do_restart() noexcept
         }
         services->process_queues();
     }
+    else {
+        // started process successfully (at least as far as fork)
+        if (start_timeout != time_val(0,0)) {
+            process_timer.arm_timer_rel(event_loop, start_timeout);
+            waiting_stopstart_timer = true;
+        }
+    }
 }
 
 bool base_process_service::restart_ps_process() noexcept
@@ -288,21 +385,6 @@ bool base_process_service::restart_ps_process() noexcept
 
     time_val current_time;
     event_loop.get_time(current_time, clock_type::MONOTONIC);
-
-    if (max_restart_interval_count != 0) {
-        // Check whether we're still in the most recent restart check interval:
-        time_val int_diff = current_time - restart_interval_time;
-        if (int_diff < restart_interval) {
-            if (restart_interval_count >= max_restart_interval_count) {
-                log(loglevel_t::ERROR, "Service ", get_name(), " restarting too quickly; stopping.");
-                return false;
-            }
-        }
-        else {
-            restart_interval_time = current_time;
-            restart_interval_count = 0;
-        }
-    }
 
     // Check if enough time has lapsed since the previous restart. If not, start a timer:
     time_val tdiff = current_time - last_start_time;
@@ -481,5 +563,28 @@ bool base_process_service::open_socket() noexcept
     }
 
     socket_fd = sockfd;
+    return true;
+}
+
+bool base_process_service::ensure_log_buffer_backing(unsigned new_size) noexcept
+{
+    //  Note: we manage capacity manually to avoid it exceeding maximum
+    if (log_buffer.size() < new_size) {
+        if (log_buffer.capacity() < new_size) {
+            try {
+                unsigned new_capacity = std::max((unsigned)log_buffer.capacity() * 2, new_size);
+                new_capacity = std::min(new_capacity, log_buf_max);
+                log_buffer.reserve(new_capacity);
+                log_buffer.resize(new_capacity);
+            }
+            catch (std::bad_alloc &badalloc) {
+                log(loglevel_t::WARN, get_name(), ": cannot increase log buffer; out-of-memory");
+                return false;
+            }
+        }
+        else {
+            log_buffer.resize(new_size);
+        }
+    }
     return true;
 }

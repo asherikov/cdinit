@@ -5,18 +5,25 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 
-#include "baseproc-sys.h"
-#include "service.h"
-#include "dinit-utmp.h"
+#if SUPPORT_CAPABILITIES
+#include <sys/capability.h>
+#endif
+
+#include <baseproc-sys.h>
+#include <service.h>
+#include <dinit-utmp.h>
+#include <dinit-util.h>
 
 // This header defines base_proc_service (base process service) and several derivatives, as well as some
 // utility functions and classes. See service.h for full details of services.
+
+class process_service;
 
 // Given a string and a list of pairs of (start,end) indices for each argument in that string,
 // store a null terminator for the argument. Return a `char *` vector containing the beginning
 // of each argument and a trailing nullptr. (The returned array is invalidated if the string is later
 // modified).
-std::vector<const char *> separate_args(std::string &s,
+std::vector<const char *> separate_args(ha_string &s,
         const std::list<std::pair<unsigned,unsigned>> &arg_indices);
 
 // Parameters for process execution
@@ -26,27 +33,45 @@ struct run_proc_params
     const char *working_dir;  // working directory
     const char *logfile;      // log file or nullptr (stdout/stderr); must be valid if !on_console
     const char *env_file;     // file with environment settings (or nullptr)
+    #if SUPPORT_CGROUPS
+    const char *run_in_cgroup = nullptr; //  cgroup path
+    #endif
+    #if SUPPORT_CAPABILITIES
+    cap_iab_t cap_iab;
+    unsigned long secbits = 0;
+    bool no_new_privs = false;
+    #endif
     bool on_console;          // whether to run on console
     bool in_foreground;       // if on console: whether to run in foreground
+    bool unmask_sigint = false; // if in foreground: whether to unmask SIGINT
+    bool nice_is_set = false;
+    int nice = 0;             // the process nice value
+    #if SUPPORT_IOPRIO
+    int ioprio = -1;          // scheduling class and priority for the process
+    #endif
+    #if SUPPORT_OOM_ADJ
+    bool oom_adj_is_set = false;
+    short oom_adj = 0;        // oom score adjustment value
+    #endif
     int wpipefd;              // pipe to which error status will be sent (if error occurs)
     int csfd;                 // control socket fd (or -1); may be moved
     int socket_fd;            // pre-opened socket fd (or -1); may be moved
     int notify_fd;            // pipe for readiness notification message (or -1); may be moved
     int force_notify_fd;      // if not -1, notification fd must be moved to this fd
+    int output_fd;            // if not -1, output will be directed here (rather than logfile)
     const char *notify_var;   // environment variable name where notification fd will be stored, or nullptr
     uid_t uid;
     gid_t gid;
     const std::vector<service_rlimits> &rlimits;
+    int input_fd = -1;        // file descriptor to be used for input (STDIN)
 
     run_proc_params(const char * const *args, const char *working_dir, const char *logfile, int wpipefd,
             uid_t uid, gid_t gid, const std::vector<service_rlimits> &rlimits)
             : args(args), working_dir(working_dir), logfile(logfile), env_file(nullptr), on_console(false),
               in_foreground(false), wpipefd(wpipefd), csfd(-1), socket_fd(-1), notify_fd(-1),
-              force_notify_fd(-1), notify_var(nullptr), uid(uid), gid(gid), rlimits(rlimits)
+              force_notify_fd(-1), output_fd(-1), notify_var(nullptr), uid(uid), gid(gid), rlimits(rlimits)
     { }
 };
-
-extern const char * const exec_stage_descriptions[static_cast<int>(exec_stage::DO_EXEC) + 1];
 
 // Error information from process execution transferred via this struct
 struct run_proc_err
@@ -62,7 +87,7 @@ class base_process_service;
 class process_restart_timer : public eventloop_t::timer_impl<process_restart_timer>
 {
     public:
-    base_process_service * service;
+    base_process_service *service;
 
     explicit process_restart_timer(base_process_service *service_p)
         : service(service_p)
@@ -76,7 +101,7 @@ class process_restart_timer : public eventloop_t::timer_impl<process_restart_tim
 class exec_status_pipe_watcher : public eventloop_t::fd_watcher_impl<exec_status_pipe_watcher>
 {
     public:
-    base_process_service * service;
+    base_process_service *service;
     dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
 
     exec_status_pipe_watcher(base_process_service * sr) noexcept : service(sr) { }
@@ -85,11 +110,24 @@ class exec_status_pipe_watcher : public eventloop_t::fd_watcher_impl<exec_status
     void operator=(const exec_status_pipe_watcher &) = delete;
 };
 
+// Like exec_status_pipe_watcher, but for watching status when exec'ing the stop command
+class stop_status_pipe_watcher : public eventloop_t::fd_watcher_impl<stop_status_pipe_watcher>
+{
+    public:
+    process_service *service;
+    dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
+
+    stop_status_pipe_watcher(process_service * sr) noexcept : service(sr) { }
+
+    stop_status_pipe_watcher(const exec_status_pipe_watcher &) = delete;
+    void operator=(const exec_status_pipe_watcher &) = delete;
+};
+
 // Watcher for readiness notification pipe
 class ready_notify_watcher : public eventloop_t::fd_watcher_impl<ready_notify_watcher>
 {
     public:
-    base_process_service * service;
+    base_process_service *service;
     dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
 
     ready_notify_watcher(base_process_service * sr) noexcept : service(sr) { }
@@ -98,17 +136,43 @@ class ready_notify_watcher : public eventloop_t::fd_watcher_impl<ready_notify_wa
     void operator=(const ready_notify_watcher &) = delete;
 };
 
-
+// watcher for main child process
 class service_child_watcher : public eventloop_t::child_proc_watcher_impl<service_child_watcher>
 {
     public:
-    base_process_service * service;
-    dasynq::rearm status_change(eventloop_t &eloop, pid_t child, int status) noexcept;
+    base_process_service *service;
+    dasynq::rearm status_change(eventloop_t &eloop, pid_t child, proc_status_t status) noexcept;
 
     service_child_watcher(base_process_service * sr) noexcept : service(sr) { }
 
     service_child_watcher(const service_child_watcher &) = delete;
     void operator=(const service_child_watcher &) = delete;
+};
+
+// watcher for the "stop-command" for process services
+class stop_child_watcher : public eventloop_t::child_proc_watcher_impl<stop_child_watcher>
+{
+    public:
+    process_service *service;
+    dasynq::rearm status_change(eventloop_t &eloop, pid_t child, proc_status_t status) noexcept;
+
+    stop_child_watcher(process_service * sr) noexcept : service(sr) { }
+
+    stop_child_watcher(const service_child_watcher &) = delete;
+    void operator=(const service_child_watcher &) = delete;
+};
+
+class log_output_watcher : public eventloop_t::fd_watcher_impl<log_output_watcher>
+{
+    public:
+    base_process_service *service;
+
+    dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
+
+    log_output_watcher(base_process_service * sr) noexcept : service(sr) { }
+
+    log_output_watcher(const ready_notify_watcher &) = delete;
+    void operator=(const ready_notify_watcher &) = delete;
 };
 
 // Base class for process-based services.
@@ -118,28 +182,57 @@ class base_process_service : public service_record
     friend class exec_status_pipe_watcher;
     friend class base_process_service_test;
     friend class ready_notify_watcher;
-
-    private:
-    // Re-launch process
-    void do_restart() noexcept;
+    friend class log_output_watcher;
 
     protected:
-    string program_name;          // storage for program/script and arguments
+    ha_string program_name;          // storage for program/script and arguments
     // pointer to each argument/part of the program_name, and nullptr:
     std::vector<const char *> exec_arg_parts;
 
-    string stop_command;          // storage for stop program/script and arguments
+    ha_string stop_command;          // storage for stop program/script and arguments
     // pointer to each argument/part of the stop_command, and nullptr:
     std::vector<const char *> stop_arg_parts;
 
     string working_dir;       // working directory (or empty)
     string env_file;          // file with environment settings for this service
 
+    log_type_id log_type = log_type_id::NONE;
+    string logfile;          // log file name, empty string specifies /dev/null
+    int logfile_perms = 0;   // logfile permissions("mode")
+    uid_t logfile_uid = -1;  // logfile owner user id
+    gid_t logfile_gid = -1;  // logfile group id
+    unsigned log_buf_max = 0; // log buffer maximum size
+    unsigned log_buf_size = 0; // log buffer current size
+    std::vector<char, default_init_allocator<char>> log_buffer;
+
+    bool nice_is_set = false;
+    int nice;
+
+#if SUPPORT_IOPRIO
+    int ioprio = -1;
+#endif
+
+#if SUPPORT_OOM_ADJ
+    bool oom_adj_is_set = false;
+    short oom_adj = 0;
+#endif
+
     std::vector<service_rlimits> rlimits; // resource limits
+
+#if SUPPORT_CAPABILITIES
+    cap_iab_wrapper cap_iab;
+    unsigned long secbits = 0;
+    bool no_new_privs = false;
+#endif
+
+#if SUPPORT_CGROUPS
+    string run_in_cgroup;
+#endif
 
     service_child_watcher child_listener;
     exec_status_pipe_watcher child_status_listener;
     process_restart_timer process_timer; // timer is used for start, stop and restart
+    log_output_watcher log_output_listener;
     time_val last_start_time;
 
     // Restart interval time and restart count are used to track the number of automatic restarts
@@ -166,16 +259,16 @@ class base_process_service : public service_record
     pid_t pid = -1;  // PID of the process. For a scripted service which is STARTING or STOPPING,
                      // this is PID of the service script; otherwise it is the PID of the process
                      // itself (process service).
-    bp_sys::exit_status exit_status; // Exit status, if the process has exited (pid == -1).
+    proc_status_t exit_status; // Exit status, if the process has exited (pid == -1).
     int socket_fd = -1;  // For socket-activation services, this is the file descriptor for the socket.
     int notification_fd = -1;  // If readiness notification is via fd
+    int log_output_fd = -1; // If logging via buffer/pipe, write end of the pipe
+    int log_input_fd = -1; // If logging via buffer/pipe, read end of the pipe
 
     // Only one of waiting_restart_timer and waiting_stopstart_timer should be set at any time.
     // They indicate that the process timer is armed (and why).
     bool waiting_restart_timer : 1;
     bool waiting_stopstart_timer : 1;
-
-    bool delay_start : 1; // delay bring-up in case of unexpected termination
 
     bool reserved_child_watch : 1;
     bool tracking_child : 1;  // whether we expect to see child process status
@@ -183,6 +276,11 @@ class base_process_service : public service_record
     // If executing child process failed, information about the error
     run_proc_err exec_err_info;
 
+    private:
+    // Re-launch process
+    void do_restart() noexcept;
+
+    protected:
     // Run a child process (call after forking). Note that some parameters specify file descriptors,
     // but in general file descriptors may be moved before the exec call.
     void run_child_proc(run_proc_params params) noexcept;
@@ -203,9 +301,8 @@ class base_process_service : public service_record
     // Called after forking (before executing remote process).
     virtual void after_fork(pid_t child_pid) noexcept { }
 
-    // Called when the process exits. The exit_status is the status value yielded by
-    // the "wait" system call.
-    virtual void handle_exit_status(bp_sys::exit_status exit_status) noexcept = 0;
+    // Called when the process exits. The exit_status variable must be set before calling.
+    virtual void handle_exit_status() noexcept = 0;
 
     void handle_unexpected_termination() noexcept;
 
@@ -213,7 +310,7 @@ class base_process_service : public service_record
     virtual void exec_failed(run_proc_err errcode) noexcept = 0;
 
     // Called if exec succeeds.
-    virtual void exec_succeeded() noexcept { };
+    virtual void exec_succeeded() noexcept { }
 
     virtual bool can_interrupt_start() noexcept override
     {
@@ -221,17 +318,16 @@ class base_process_service : public service_record
                 || service_record::can_interrupt_start();
     }
 
-    virtual bool can_proceed_to_start() noexcept override
-    {
-        return !waiting_restart_timer && !delay_start;
-    }
-
     virtual bool interrupt_start() noexcept override;
 
     void becoming_inactive() noexcept override;
 
+    // Get the file descriptor which the process should read input from (STDIN).
+    // Return false on failure. If input_fd returned is -1, process has no specific input.
+    virtual bool get_input_fd(int *input_fd) noexcept { *input_fd = -1; return true; }
+
     // Kill with SIGKILL
-    void kill_with_fire() noexcept;
+    virtual void kill_with_fire() noexcept;
 
     // Signal the process group of the service process
     void kill_pg(int signo) noexcept;
@@ -245,10 +341,12 @@ class base_process_service : public service_record
         return nullptr;
     }
 
+    bool ensure_log_buffer_backing(unsigned size) noexcept;
+
     public:
     // Constructor for a base_process_service. Note that the various parameters not specified here must in
     // general be set separately (using the appropriate set_xxx function for each).
-    base_process_service(service_set *sset, string name, service_type_t record_type_p, string &&command,
+    base_process_service(service_set *sset, string name, service_type_t record_type_p, ha_string &&command,
             const std::list<std::pair<unsigned,unsigned>> &command_offsets,
             const std::list<prelim_dep> &deplist_p);
 
@@ -258,24 +356,25 @@ class base_process_service : public service_record
             child_listener.unreserve(event_loop);
         }
         process_timer.deregister(event_loop);
+        set_log_mode(log_type_id::NONE);
     }
 
     // Set the command to run this service (executable and arguments, nul separated). The command_parts_p
     // vector must contain pointers to each part.
-    void set_command(std::string &&command_p, std::vector<const char *> &&command_parts_p) noexcept
+    void set_command(ha_string &&command_p, std::vector<const char *> &&command_parts_p) noexcept
     {
         program_name = std::move(command_p);
         exec_arg_parts = std::move(command_parts_p);
     }
 
-    void get_command(std::string &command_p, std::vector<const char *> &command_parts_p)
+    void get_command(ha_string &command_p, std::vector<const char *> &command_parts_p)
     {
         command_p = program_name;
         command_parts_p = exec_arg_parts;
     }
 
     // Set the stop command and arguments (may throw std::bad_alloc)
-    void set_stop_command(const std::string &command,
+    void set_stop_command(ha_string &command,
             std::list<std::pair<unsigned,unsigned>> &stop_command_offsets)
     {
         stop_command = command;
@@ -285,11 +384,99 @@ class base_process_service : public service_record
     // Set the stop command as a sequence of nul-terminated parts (arguments).
     //   command - the command and arguments, each terminated with nul ('\0')
     //   command_parts - pointers to the beginning of each command part
-    void set_stop_command(std::string &&command,
+    void set_stop_command(ha_string &&command,
             std::vector<const char *> &&command_parts) noexcept
     {
         stop_command = std::move(command);
         stop_arg_parts = std::move(command_parts);
+    }
+
+    void set_logfile_details(string &&logfile, int logfile_perms, uid_t logfile_uid, gid_t logfile_gid)
+            noexcept
+    {
+        this->logfile = std::move(logfile);
+        this->logfile_perms = logfile_perms;
+        this->logfile_uid = logfile_uid;
+        this->logfile_gid = logfile_gid;
+    }
+
+    // Set log buffer maximum size (for if mode is BUFFER). Maximum allowed size is UINT_MAX / 2
+    // (must be checked by caller).
+    void set_log_buf_max(unsigned max_size) noexcept
+    {
+        this->log_buf_max = max_size;
+    }
+
+    // Set log mode (NONE, BUFFER, FILE, PIPE) (must not change mode when service is not STOPPED).
+    void set_log_mode(log_type_id log_type) noexcept
+    {
+        if (this->log_type == log_type) {
+            return;
+        }
+        if (log_output_fd != -1) {
+            if (this->log_type == log_type_id::BUFFER) {
+                log_output_listener.deregister(event_loop);
+            }
+            if (!value(log_type).is_in(log_type_id::BUFFER, log_type_id::PIPE)) {
+                bp_sys::close(log_output_fd);
+                bp_sys::close(log_input_fd);
+                log_output_fd = log_input_fd = -1;
+            }
+        }
+        this->log_type = log_type;
+    }
+
+    log_type_id get_log_mode() noexcept
+    {
+        return this->log_type;
+    }
+
+    // Set the output pipe descriptors (both read and write end). This is only valid to call for
+    // log mode PIPE and only when the service has just been loaded. It is intended for transfer
+    // of fds from a placeholder service.
+    void set_output_pipe_fds(std::pair<int,int> fds)
+    {
+        log_input_fd = fds.first;
+        log_output_fd = fds.second;
+    }
+
+    std::pair<int,int> transfer_output_pipe() noexcept override
+    {
+        std::pair<int,int> r { log_input_fd, log_output_fd };
+        if (log_type == log_type_id::BUFFER && log_output_fd != -1) {
+            log_output_listener.deregister(event_loop);
+        }
+        log_input_fd = log_output_fd = -1;
+        return r;
+    }
+
+    int get_output_pipe_fd() noexcept override
+    {
+        if (log_input_fd != -1) {
+            return log_input_fd;
+        }
+
+        int pipefds[2];
+        if (bp_sys::pipe2(pipefds, O_CLOEXEC) == -1) {
+            log(loglevel_t::ERROR, get_name(), ": Can't open output pipe: ", std::strerror(errno));
+            return -1;
+        }
+        log_input_fd = pipefds[0];
+        log_output_fd = pipefds[1];
+        return log_input_fd;
+    }
+
+    // Get the log buffer (address, length)
+    std::pair<const char *, unsigned> get_log_buffer() noexcept
+    {
+        return {log_buffer.data(), log_buf_size};
+    }
+
+    void clear_log_buffer() noexcept
+    {
+        log_buffer.clear();
+        log_buffer.shrink_to_fit();
+        log_buf_size = 0;
     }
 
     void set_env_file(const std::string &env_file_p)
@@ -301,6 +488,42 @@ class base_process_service : public service_record
     {
         env_file = std::move(env_file_p);
     }
+
+    #if SUPPORT_CGROUPS
+    void set_cgroup(std::string &&run_in_cgroup_p) noexcept
+    {
+        run_in_cgroup = std::move(run_in_cgroup_p);
+    }
+    #endif
+
+    #if SUPPORT_CAPABILITIES
+    void set_cap(cap_iab_wrapper &&iab, unsigned int sbits) noexcept
+    {
+        cap_iab = std::move(iab);
+        secbits = sbits;
+    }
+    #endif
+
+    void set_nice(int nice_v, bool is_set) noexcept
+    {
+        nice_is_set = is_set;
+        nice = nice_v;
+    }
+
+    #if SUPPORT_IOPRIO
+    void set_ioprio(int ioprio_v) noexcept
+    {
+        ioprio = ioprio_v;
+    }
+    #endif
+
+    #if SUPPORT_OOM_ADJ
+    void set_oom_adj(short oom_adj_v, bool is_set) noexcept
+    {
+        oom_adj_is_set = is_set;
+        oom_adj = oom_adj_v;
+    }
+    #endif
 
     void set_rlimits(std::vector<service_rlimits> &&rlimits_p)
     {
@@ -342,12 +565,8 @@ class base_process_service : public service_record
     }
 
     // Set the working directory
-    void set_working_dir(const string &working_dir_p)
-    {
-        working_dir = working_dir_p;
-    }
-
-    void set_working_dir(string &&working_dir_p) noexcept
+    // Note: constructing parameter may throw!
+    void set_working_dir(string working_dir_p) noexcept
     {
         working_dir = std::move(working_dir_p);
     }
@@ -374,29 +593,56 @@ class base_process_service : public service_record
         return exec_arg_parts;
     }
 
-    pid_t get_pid() override
+    pid_t get_pid() noexcept override
     {
         return pid;
     }
 
-    int get_exit_status() override
+    proc_status_t get_exit_status() noexcept override
     {
-        return exit_status.as_int();
+        return exit_status;
+    }
+
+    // Get reason for failure to exec process (if stop reason indicates exec failure)
+    run_proc_err get_exec_err_info()
+    {
+        return exec_err_info;
     }
 };
 
 // Standard process service.
 class process_service : public base_process_service
 {
-    virtual void handle_exit_status(bp_sys::exit_status exit_status) noexcept override;
+    friend class stop_child_watcher;
+    friend class stop_status_pipe_watcher;
+    friend class base_process_service_test;
+
+    protected:
+    virtual void handle_exit_status() noexcept override;
     virtual void exec_failed(run_proc_err errcode) noexcept override;
     virtual void exec_succeeded() noexcept override;
     virtual void bring_down() noexcept override;
+    virtual void kill_with_fire() noexcept override;
+
+    bool start_stop_process(const std::vector<const char *> &cmd) noexcept;
+
+    bool reserved_stop_watch : 1;
+    bool stop_issued : 1;
+
+    pid_t stop_pid = -1;
+    proc_status_t stop_status = {};
 
     ready_notify_watcher readiness_watcher;
+    stop_child_watcher stop_watcher;
+    stop_status_pipe_watcher stop_pipe_watcher;
+
+    bool doing_smooth_recovery = false; // if we are performing smooth recovery
+
+    service_record *consumer_for = nullptr;
 
 #if USE_UTMPX
 
+    private:
     char inittab_id[sizeof(utmpx().ut_id)];
     char inittab_line[sizeof(utmpx().ut_line)];
 
@@ -416,57 +662,144 @@ class process_service : public base_process_service
         return &readiness_watcher;
     }
 
+    void handle_stop_exit() noexcept
+    {
+        if (!stop_status.did_exit_clean()) {
+            if (stop_status.did_exit()) {
+                log(loglevel_t::ERROR, "Service ", get_name(), " stop command terminated with exit code ",
+                        stop_status.get_exit_status());
+            }
+            else if (stop_status.was_signalled()) {
+                log(loglevel_t::ERROR, "Service ", get_name(), " stop command terminated due to signal ",
+                        stop_status.get_signal());
+            }
+        }
+
+        if (pid == -1 || !tracking_child) {
+            // If service process has already finished, we were just waiting for the stop command
+            // process:
+            stop_issued = false; // reset for next time
+            stopped();
+        }
+    }
+
+    virtual bool check_restart() noexcept override
+    {
+        if (max_restart_interval_count != 0) {
+            // Check whether we're still in the most recent restart check interval:
+            time_val current_time;
+            event_loop.get_time(current_time, clock_type::MONOTONIC);
+            time_val int_diff = current_time - restart_interval_time;
+            if (int_diff < restart_interval) {
+                // Within the restart limiting interval; check number of restarts
+                if (restart_interval_count >= max_restart_interval_count) {
+                    log(loglevel_t::ERROR, "Service ", get_name(), " restarting too quickly; stopping.");
+                    set_target_state(service_state_t::STOPPED);
+                    return false;
+                }
+                ++restart_interval_count;
+            }
+            else {
+                // Not within the last limiting interval; start a new interval
+                restart_interval_time = current_time;
+                restart_interval_count = 1;
+            }
+        }
+
+        return true;
+    }
+
+    bool get_input_fd(int *input_fd) noexcept override
+    {
+        if (consumer_for == nullptr) {
+            *input_fd = -1;
+            return true;
+        }
+
+        int cfd = consumer_for->get_output_pipe_fd();
+        if (cfd == -1) return false;
+        *input_fd = cfd;
+        return true;
+    }
+
+    process_service(service_set *sset, const string &name, service_type_t s_type, ha_string &&command,
+            std::list<std::pair<unsigned,unsigned>> &command_offsets,
+            const std::list<prelim_dep> &depends_p)
+         : base_process_service(sset, name, s_type, std::move(command), command_offsets,
+             depends_p), reserved_stop_watch(false), stop_issued(false),
+             readiness_watcher(this), stop_watcher(this), stop_pipe_watcher(this)
+    {
+    }
+
     public:
-    process_service(service_set *sset, const string &name, string &&command,
+    process_service(service_set *sset, const string &name, ha_string &&command,
             std::list<std::pair<unsigned,unsigned>> &command_offsets,
             const std::list<prelim_dep> &depends_p)
          : base_process_service(sset, name, service_type_t::PROCESS, std::move(command), command_offsets,
-             depends_p), readiness_watcher(this)
+             depends_p), reserved_stop_watch(false), stop_issued(false),
+             readiness_watcher(this), stop_watcher(this), stop_pipe_watcher(this)
     {
     }
 
 #if USE_UTMPX
 
     // Set the id of the process in utmp (the "inittab" id)
-    void set_utmp_id(const char *id)
+    void set_utmp_id(const char *id) noexcept
     {
         strncpy(inittab_id, id, sizeof(inittab_id));
     }
 
     // Set the device line of the process in utmp database
-    void set_utmp_line(const char *line)
+    void set_utmp_line(const char *line) noexcept
     {
         strncpy(inittab_line, line, sizeof(inittab_line));
     }
 
     // Get the utmp (inittab) id, may not be nul terminated if maximum length!
-    const char *get_utmp_id()
+    const char *get_utmp_id() noexcept
     {
         return inittab_id;
     }
 
     // Get the utmp (inittab) line, may not be nul terminated if maximum length!
-    const char *get_utmp_line()
+    const char *get_utmp_line() noexcept
     {
         return inittab_line;
     }
 
-    constexpr size_t get_utmp_id_size() const { return sizeof(inittab_id); }
-    constexpr size_t get_utmp_line_size() const { return sizeof(inittab_line); }
+    constexpr size_t get_utmp_id_size() const noexcept { return sizeof(inittab_id); }
+    constexpr size_t get_utmp_line_size() const noexcept { return sizeof(inittab_line); }
 
 #endif
 
+    // Set this service to consume output of specified service (only call while service stopped).
+    void set_consumer_for(service_record *consumed) noexcept
+    {
+        consumer_for = consumed;
+    }
+
+    service_record *get_consumed() noexcept
+    {
+        return consumer_for;
+    }
+
     ~process_service() noexcept
     {
+        if (reserved_stop_watch) {
+            stop_watcher.unreserve(event_loop);
+        }
+        if (consumer_for != nullptr) {
+            consumer_for->set_log_consumer(nullptr);
+        }
     }
 };
 
 // Bgproc (self-"backgrounding", i.e. double-forking) process service
-class bgproc_service : public base_process_service
+class bgproc_service : public process_service
 {
-    virtual void handle_exit_status(bp_sys::exit_status exit_status) noexcept override;
+    virtual void handle_exit_status() noexcept override;
+    virtual void exec_succeeded() noexcept override;
     virtual void exec_failed(run_proc_err errcode) noexcept override;
-    virtual void bring_down() noexcept override;
 
     enum class pid_result_t {
         OK,
@@ -477,15 +810,13 @@ class bgproc_service : public base_process_service
     string pid_file;
 
     // Read the pid-file contents
-    pid_result_t read_pid_file(bp_sys::exit_status *exit_status) noexcept;
-
-    bool doing_smooth_recovery = false; // if we are performing smooth recovery
+    pid_result_t read_pid_file(proc_status_t *exit_status) noexcept;
 
     public:
-    bgproc_service(service_set *sset, const string &name, string &&command,
+    bgproc_service(service_set *sset, const string &name, ha_string &&command,
             std::list<std::pair<unsigned,unsigned>> &command_offsets,
             const std::list<prelim_dep> &depends_p)
-         : base_process_service(sset, name, service_type_t::BGPROCESS, std::move(command), command_offsets,
+         : process_service(sset, name, service_type_t::BGPROCESS, std::move(command), command_offsets,
              depends_p)
     {
     }
@@ -508,7 +839,7 @@ class bgproc_service : public base_process_service
 // Service which is started and stopped via separate commands
 class scripted_service : public base_process_service
 {
-    virtual void handle_exit_status(bp_sys::exit_status exit_status) noexcept override;
+    virtual void handle_exit_status() noexcept override;
     virtual void exec_succeeded() noexcept override;
     virtual void exec_failed(run_proc_err errcode) noexcept override;
     virtual void bring_down() noexcept override;
@@ -524,7 +855,7 @@ class scripted_service : public base_process_service
     bool interrupting_start : 1;  // running start script (true) or stop script (false)
 
     public:
-    scripted_service(service_set *sset, const string &name, string &&command,
+    scripted_service(service_set *sset, const string &name, ha_string &&command,
             std::list<std::pair<unsigned,unsigned>> &command_offsets,
             const std::list<prelim_dep> &depends_p)
          : base_process_service(sset, name, service_type_t::SCRIPTED, std::move(command), command_offsets,
