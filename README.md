@@ -1,7 +1,7 @@
 Introduction
 ============
 
-`cmake`/`catkin` wrapper for `dinit` service manager
+`cmake` wrapper for `dinit` service manager
 (https://github.com/davmac314/dinit). The purpose of this package is to provide
 an intermediate service manager working between `systemd` (or a system service
 manager in general) and `roslaunch` in `ROS` environments. Motivation,
