@@ -7,4 +7,4 @@ stop-timeout = 20.0
 
 # let it output to console
 options = shares-console always-chain
-chain-to = shutdown
+chain-to = cdinit_shutdown

@@ -1,8 +1,9 @@
-#!/bin/bash -x
+#!/bin/bash
 # shellcheck disable=SC2001
 
 # fail on error
 set -e
+set -o pipefail
 
 if [ -n "$CCW_ARTIFACTS_DIR" ];
 then
@@ -21,8 +22,9 @@ mkdir -p "${DINIT_WORKING_ROOT}"
 #DINIT_WORKING_ROOT="${DINIT_WORKING_ROOT}/$(date '+%Y_%m_%d_%H_%M_%S')_XXX"
 #DINIT_WORKING_ROOT="$(mktemp -d '${DINIT_WORKING_ROOT}')"
 
-SEARCH_PATHS=( $(echo "${ROS_PACKAGE_PATH}" | tr ":" " ") )
-DINIT_SERVICES_DIR=( $(find "${SEARCH_PATHS[@]}" -type d -name "dinit_services" | sed "s/^/--services-dir /" | xargs echo) )
+INSTALL_ROOT=$(realpath "$(dirname "$0")/../")
+SEARCH_PATHS=( $(echo "${INSTALL_ROOT}:${ROS_PACKAGE_PATH}" | tr ":" " ") )
+DINIT_SERVICES_DIR=( $(find "${SEARCH_PATHS[@]}" -type d -name "cdinit_services" | sed "s/^/--services-dir /" | xargs echo) )
 
 VAR_PATTERN='[[:alnum:]_]\+=[[:alnum:]_]*'
 DINIT_ENVIRONMENT=( $(echo "$@" | grep -o "${VAR_PATTERN}" || true) )
@@ -32,7 +34,7 @@ DINIT_ARGS=( $(echo "$DINIT_ARGS" | sed "s/__[[:alnum:]_]\+:=[[:graph:]_]*//g") 
 
 
 env "${DINIT_ENVIRONMENT[@]}" \
-    rosrun cdinit dinit \
+    dinit \
     "${DINIT_SERVICES_DIR[@]}" \
     --socket-path "${DINIT_WORKING_ROOT}/socket" \
     --log-file "${DINIT_WORKING_ROOT}/log" \

@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="2">
-    <name>cdinit</name>
-    <version>0.2.0</version>
-    <description>The cdinit package</description>
+    <name>cdinit_manager</name>
+    <version>0.3.0</version>
+    <description>cdinit management scripts</description>
     <maintainer email="asherikov@yandex.com">Alexander Sherikov</maintainer>
     <license>Apache 2.0</license>
 
@@ -11,4 +11,6 @@
     </export>
 
     <buildtool_depend>cmake</buildtool_depend>
+
+    <exec_depend>cdinit</exec_depend>
 </package>

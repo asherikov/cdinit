@@ -2,6 +2,7 @@
 
 # fail on error
 set -e
+set -o pipefail
 
 if [ -n "$CCW_ARTIFACTS_DIR" ];
 then
@@ -20,6 +21,6 @@ DINIT_ENVIRONMENT=( $(echo "$@" | grep -o "${VAR_PATTERN}" || true) )
 DINIT_ARGS=( $(echo "$@" | sed "s/${VAR_PATTERN}//g") )
 
 env "${DINIT_ENVIRONMENT[@]}" \
-    rosrun cdinit dinitctl \
+    dinitctl \
     --socket-path "${DINIT_WORKING_ROOT}/socket" \
     "${DINIT_ARGS[@]}"

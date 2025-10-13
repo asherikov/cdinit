@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="2">
+    <name>cdinit</name>
+    <version>0.3.0</version>
+    <description>The cdinit package</description>
+    <maintainer email="asherikov@yandex.com">Alexander Sherikov</maintainer>
+    <license>Apache 2.0</license>
+
+    <export>
+        <build_type>cmake</build_type>
+    </export>
+
+    <buildtool_depend>cmake</buildtool_depend>
+</package>

@@ -81,10 +81,3 @@ install(TARGETS dinit dinitctl dinitcheck
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
-
-foreach(DIR dinit_services scripts)
-    install(DIRECTORY ${DIR}
-        DESTINATION share/${PROJECT_NAME}/
-        USE_SOURCE_PERMISSIONS
-    )
-endforeach()
