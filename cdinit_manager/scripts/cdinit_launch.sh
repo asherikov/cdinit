@@ -1,5 +1,4 @@
 #!/bin/bash
-# shellcheck disable=SC2001
 
 # fail on error
 set -e
@@ -23,14 +22,14 @@ mkdir -p "${DINIT_WORKING_ROOT}"
 #DINIT_WORKING_ROOT="$(mktemp -d '${DINIT_WORKING_ROOT}')"
 
 INSTALL_ROOT=$(realpath "$(dirname "$0")/../")
-SEARCH_PATHS=( $(echo "${INSTALL_ROOT}:${ROS_PACKAGE_PATH}" | tr ":" " ") )
-DINIT_SERVICES_DIR=( $(find "${SEARCH_PATHS[@]}" -type d -name "cdinit_services" | sed "s/^/--services-dir /" | xargs echo) )
+IFS=":" read -r -a SEARCH_PATHS <<< "${INSTALL_ROOT}:${ROS_PACKAGE_PATH}"
+read -r -a DINIT_SERVICES_DIR <<< "$(find "${SEARCH_PATHS[@]}" -type d -name "cdinit_services" | sed "s/^/--services-dir /" | tr '\n' ' ')"
 
 VAR_PATTERN='[[:alnum:]_]\+=[[:alnum:]_]*'
-DINIT_ENVIRONMENT=( $(echo "$@" | grep -o "${VAR_PATTERN}" || true) )
-DINIT_ARGS=( $(echo "$@" | sed "s/${VAR_PATTERN}//g") )
+read -r -a DINIT_ENVIRONMENT <<< "$(echo "$@" | grep -o "${VAR_PATTERN}" || true)"
+read -r -a DINIT_ARGS <<< "$(echo "$@" | sed "s/${VAR_PATTERN}//g")"
 # strip ROS args
-DINIT_ARGS=( $(echo "$DINIT_ARGS" | sed "s/__[[:alnum:]_]\+:=[[:graph:]_]*//g") )
+read -r -a DINIT_ARGS <<< "$(echo "${DINIT_ARGS[@]}" | sed "s/__[[:alnum:]_]\+:=[[:graph:]_]*//g")"
 
 
 env "${DINIT_ENVIRONMENT[@]}" \

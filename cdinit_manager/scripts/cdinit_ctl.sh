@@ -17,8 +17,8 @@ else
 fi
 
 VAR_PATTERN='[[:alnum:]_]\+=[[:alnum:]_]*'
-DINIT_ENVIRONMENT=( $(echo "$@" | grep -o "${VAR_PATTERN}" || true) )
-DINIT_ARGS=( $(echo "$@" | sed "s/${VAR_PATTERN}//g") )
+read -r -a DINIT_ENVIRONMENT <<< "$(echo "$@" | grep -o "${VAR_PATTERN}" || true)"
+read -r -a DINIT_ARGS <<< "$(echo "$@" | sed "s/${VAR_PATTERN}//g")"
 
 env "${DINIT_ENVIRONMENT[@]}" \
     dinitctl \
