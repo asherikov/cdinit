@@ -6,7 +6,13 @@ project(cdinit_manager NONE)
 #############
 
 install(PROGRAMS
-    scripts/cdinit_ctl.sh
-    scripts/cdinit_launch.sh
+    scripts/cdinit.sh
     DESTINATION bin
 )
+
+foreach(DIR cdinit_services)
+    install(DIRECTORY ${DIR}
+        DESTINATION share/${PROJECT_NAME}/
+        USE_SOURCE_PERMISSIONS
+    )
+endforeach()

@@ -19,7 +19,7 @@ Example
 Steps:
 - build `cdinit_examples` in a `colcon` workspace;
 - source installation space setup script;
-- run `cdinit_launch.sh timeout CDINIT_TIMEOUT=1` -- here `timeout` is an
+- run `cdinit.sh start cdinit_timeout CDINIT_TIMEOUT=1` -- here `timeout` is an
   example service, `CDINIT_TIMEOUT` is passed to the service as environment
   variable.
 
