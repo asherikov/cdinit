@@ -1,5 +1,4 @@
 type = process
-load-options = sub-vars
 command = sleep $CDINIT_TIMEOUT
 
 # ROS waits 15 second
