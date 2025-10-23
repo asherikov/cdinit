@@ -2,12 +2,12 @@ Introduction
 ============
 
 ROS compatible `cmake` wrapper for `dinit` service manager
-<https://github.com/davmac314/dinit>. This package aims to replace or
-complement launching mechanisms used in robotics applications: `roslaunch`,
+<https://github.com/davmac314/dinit>. This tool aims at replacing or
+complementing launching mechanisms used in robotics applications: `roslaunch`,
 `ros2launch`, `tmux`, `screen`, etc.
 
-Repository layout
------------------
+Packages
+--------
 
 - `cdinit/` -- dinit executables
 - `cdinit_manager/` -- helper scripts
@@ -18,9 +18,9 @@ Example
 
 Steps:
 - build `cdinit_examples` in a `colcon` workspace;
-- source installation space setup script;
+- source setup script;
 - run `cdinit.sh start cdinit_timeout CDINIT_TIMEOUT=1` -- here `timeout` is an
-  example service, `CDINIT_TIMEOUT` is passed to the service as environment
+  example service, `CDINIT_TIMEOUT` is passed to the service as an environment
   variable.
 
 Dependencies
@@ -41,22 +41,24 @@ Neither ROS1/ROS2 launch nor their conceptually similar alternatives are well
 designed for service management:
 
 - They lack startup ordering, runtime dependencies, advanced failure handling,
-  and many other features provided by system service managers.
+  and many other features provided by system service managers such as
+  `systemd`.
 
-- They provide end-users too much scripting freedom, which in practice results
-  in mixing of service management logic with application logic. This is a
-  particularly major issue in python launch scripts encouraged by ROS2.
+- They favor scripting to declarative syntax, which essentially the same as
+  using old-school RC scripts instead of `systemd`-like service units. In
+  practice this results in application logic leaks into startup scripts,
+  turning the whole system into a spaghetti monster.
 
-- ROS2 python launch scripts are excessively verbose, e.g., see
+- ROS2 python launch scripts are excessively verbose, e.g., see discussion at
   <https://github.com/dfki-ric/better_launch>.
 
-- ROS2 launch uses shared variable scope by default, which makes launch script
-  inclusion fragile and dangerous <https://github.com/ros2/launch/issues/815>.
+- ROS launch relies on script inclusion, which is fragile and dangerous in ROS2
+  due to shared scope <https://github.com/ros2/launch/issues/815>.
 
-- It is common to use multiple launch scripts in practice in order to make
-  software stack more managable, e.g., in order to make logs readable or be
-  able to restart parts of the stack, in which case an additional
-  "launch-service" manager is needed.
+- It is common to use multiple launch scripts in order to make software stack
+  more manageable, e.g., in order to make logs readable or be able to restart
+  parts of the stack. In this case an additional "launch-service" manager is
+  needed.
 
 
 Problems with `systemd`
@@ -64,8 +66,8 @@ Problems with `systemd`
 
 Software stack deployed on a robot should generally be started automatically on
 boot -- in order to achieve that a system service is usually created. System
-service manager could also handle components of the stack, but there are some
-caveats too:
+service manager could also handle components of the stack individually, but
+there are some caveats:
 
 - Startup scripts usually must be installed to predefined locations in the
   system, or in user home directory
