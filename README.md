@@ -91,3 +91,49 @@ Advantages of `dinit`
 
 - `dinit` is a compact application without any heavy dependencies.
 
+
+Design
+======
+
+`cdinit.sh` provides cli user interface to the service manager. The script
+wraps both `dinit` and `dinitctl` tools and performs various tasks to
+facilitate their usage.
+
+Environment variables
+---------------------
+
+`cdinit.sh` sets environment variables which are going to be available for all
+services.
+
+The following are set automatically:
+
+- `CDINIT_INSTALL_ROOT` -- installation root deduced based on location of
+  `cdinit.sh`.
+- `CDINIT_WORKING_ROOT` -- working directory, which can be controlled by other
+  environment variables such as `ROS_LOG_DIR`, must be writable. `dinit`
+  control socket is created in this directory.
+- `CDINIT_SESSION_ID` -- unique session id, that can be used to identify
+  particular runs.
+- `CDINIT_SESSION_ROOT` -- `CDINIT_WORKING_ROOT/CDINIT_SESSION_ID` directory,
+  recommended location for log files.
+
+Additional environment variables can be provided by the user, e.g., `cdinit.sh
+VARIABLE=VALUE`.
+
+
+Dummy service
+-------------
+
+`cdinit.sh` automatically launches `dinit` with a dummy `cdinit_main` service
+if it is not present. Dummy service helps to persist service manager state:
+environment variables, session, etc. The rest of the command line arguments are
+passed to `dinitctl` if provided.
+
+
+Service directories
+-------------------
+
+`cdinit.sh` finds directories named `cdinit_services` under
+`CDINIT_INSTALL_ROOT` and other `ROS`/`ament` paths, and passes them to `dinit`
+when it is started for the first time. Service names should be prefixed by the
+package name in order to avoid collisions.

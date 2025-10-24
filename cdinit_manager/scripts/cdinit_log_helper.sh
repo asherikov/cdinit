@@ -4,5 +4,5 @@
 set -e
 set -o pipefail
 
-ts '%.s' | cat > "${CDINIT_WORKING_ROOT}/$1.log"
+ts '%.s' | cat >> "${CDINIT_SESSION_ROOT}/$1.log"
 
