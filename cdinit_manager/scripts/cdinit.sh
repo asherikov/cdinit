@@ -32,7 +32,7 @@ then
 
     ###
     # Generate session id
-    CDINIT_SESSION_ID=$(mktemp --directory --dry-run "session_$(date +%Y%m%d_%H%M%S)_$(printf "%05d" "$(find "${CDINIT_WORKING_ROOT}" -maxdepth 1 -name "session_*" | wc -l)")_XXXXX")
+    CDINIT_SESSION_ID=$(mktemp --directory --dry-run "session_$(printf "%05d" "$(find "${CDINIT_WORKING_ROOT}" -maxdepth 1 -name "session_*" | wc -l)")_$(date +%Y%m%d_%H%M%S)_XXXXX")
     CDINIT_SESSION_ROOT=${CDINIT_WORKING_ROOT}/${CDINIT_SESSION_ID}
     echo "cdinit session root is '${CDINIT_SESSION_ROOT}'"
     mkdir -p "${CDINIT_SESSION_ROOT}"

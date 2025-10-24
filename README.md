@@ -137,3 +137,15 @@ Service directories
 `CDINIT_INSTALL_ROOT` and other `ROS`/`ament` paths, and passes them to `dinit`
 when it is started for the first time. Service names should be prefixed by the
 package name in order to avoid collisions.
+
+
+TODO
+====
+
+I would like to see a few features implemented in `dinit`, but the author only
+accepts pull requests:
+
+- Automatically generated log file names, e.g., `<prefix specified via command
+  line>/<service name>.log`, to avoid boilerplate parameters in service files.
+- Timestamp log messages.
+- `dinitctl` to optionally wait for control socket to be created.
