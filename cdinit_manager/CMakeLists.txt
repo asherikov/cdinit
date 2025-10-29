@@ -8,6 +8,7 @@ project(cdinit_manager NONE)
 install(PROGRAMS
     scripts/cdinit.sh
     scripts/cdinit_log_helper.sh
+    scripts/cdinit_graph.py
     DESTINATION bin
 )
 

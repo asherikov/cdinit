@@ -139,6 +139,14 @@ when it is started for the first time. Service names should be prefixed by the
 package name in order to avoid collisions.
 
 
+Extra features
+--------------
+
+- `cdinit.sh listall` lists all services found in cdinit service directories.
+- `cdinit.sh graph` outputs service dependency graph in graphviz dot format
+  using `cdinit_graph.py` utility.
+
+
 TODO
 ====
 
@@ -149,3 +157,7 @@ accepts pull requests:
   line>/<service name>.log`, to avoid boilerplate parameters in service files.
 - Timestamp log messages.
 - `dinitctl` to optionally wait for control socket to be created.
+- Introduce a naming convention, e.g., '@' suffix, to separate parametrized
+  services from basic ones: currently service file needs top be checked for
+  parameter
+  substitutions.
