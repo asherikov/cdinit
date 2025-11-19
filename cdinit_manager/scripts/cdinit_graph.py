@@ -293,15 +293,67 @@ def generate_dot_format(nodes, edges):
     return '\n'.join(dot_lines)
 
 
+def filter_graph_to_services(nodes, edges, target_services):
+    """
+    Filter the dependency graph to only include specified services and their dependencies.
+    Only the selected services and services they depend on should be visualized,
+    services that depend on selected services should be omitted.
+
+    Args:
+        nodes (dict): Dictionary mapping service names to types
+        edges (list): List of (source, target, dependency_type) tuples
+        target_services (list): List of service names to include in the filtered graph
+
+    Returns:
+        tuple: (filtered_nodes, filtered_edges) containing only the services and their dependencies
+    """
+    # Start with the target services
+    all_relevant_services = set(target_services)
+
+    # Keep adding dependencies until no new ones are found
+    # Only add services that the current services depend ON (not services that depend on them)
+    changed = True
+    while changed:
+        changed = False
+        new_services = set()
+
+        for source, target, dep_type in edges:
+            # Only add the target if source is in our graph and target is not
+            # This means we're following dependency arrows FROM our selected services
+            if source in all_relevant_services and target not in all_relevant_services:
+                new_services.add(target)
+                changed = True
+
+        all_relevant_services.update(new_services)
+
+    # Filter nodes to only include relevant services
+    filtered_nodes = {name: nodes[name] for name in all_relevant_services if name in nodes}
+
+    # Filter edges to only include those between relevant services
+    # Only keep edges where both source and target are in our relevant services set
+    filtered_edges = [
+        (source, target, dep_type)
+        for source, target, dep_type in edges
+        if source in all_relevant_services and target in all_relevant_services
+    ]
+
+    return filtered_nodes, filtered_edges
+
+
 def main():
     """Parse command line arguments and generate the dependency graph."""
     parser = argparse.ArgumentParser(
         description='Parse dinit service files and generate a dependency graph in Graphviz dot format.'
     )
     parser.add_argument(
-        'directories',
+        '-d', '--directories',
         nargs='+',
         help='Directories to traverse for dinit service files'
+    )
+    parser.add_argument(
+        '-s', '--services',
+        nargs='*',
+        help='Optional list of service names to visualize (if not provided, all services are visualized)'
     )
     parser.add_argument(
         '-o', '--output',
@@ -322,6 +374,10 @@ def main():
 
     # Build the dependency graph
     nodes, edges = build_dependency_graph(service_files)
+
+    # If specific service names were provided, filter the graph to only include those services and their dependencies
+    if args.services:
+        nodes, edges = filter_graph_to_services(nodes, edges, args.services)
 
     # Generate and output the dot format to the specified output
     dot_output = generate_dot_format(nodes, edges)

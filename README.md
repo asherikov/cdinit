@@ -143,8 +143,8 @@ Extra features
 --------------
 
 - `cdinit.sh listall` lists all services found in cdinit service directories.
-- `cdinit.sh graph` outputs service dependency graph in graphviz dot format
-  using `cdinit_graph.py` utility.
+- `cdinit.sh graph [services]` outputs service dependency graph in graphviz dot
+  format using `cdinit_graph.py` utility.
 
 
 Predefined services
