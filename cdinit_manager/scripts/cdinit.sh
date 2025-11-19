@@ -64,7 +64,7 @@ case "${CDINIT_ARGS[0]}" in
 
     start)
         # start main if needed
-        if [ ! -S "${CDINIT_SOCKET}" ] || (! "${CDINITCTL[@]}" status cdinit_main > /dev/null)
+        if [ ! -S "${CDINIT_SOCKET}" ] || (! "${CDINITCTL[@]}" status cdinit_main &> /dev/null)
         then
             echo "cdinit working directory is '${CDINIT_WORKING_ROOT}'"
             mkdir -p "${CDINIT_WORKING_ROOT}"
@@ -84,9 +84,9 @@ case "${CDINIT_ARGS[0]}" in
                 --log-file "${CDINIT_WORKING_ROOT}/log" \
                 --user \
                 cdinit_main &
-            while [ ! -S "${CDINIT_SOCKET}" ]
+            while ! "${CDINITCTL[@]}" list &> /dev/null
             do
-                sleep 0.05
+                sleep 0.1
             done
 
             "${CDINITCTL[@]}" setenv "CDINIT_INSTALL_ROOT=${CDINIT_INSTALL_ROOT}"

@@ -11,13 +11,13 @@ Packages
 
 - `cdinit/` -- dinit executables
 - `cdinit_manager/` -- helper scripts
-- `cdinit_examples/` -- examples
+- `cdinit_ros2/` -- ROS2 common unit scripts
 
 Example
 -------
 
 Steps:
-- build `cdinit_examples` in a `colcon` workspace;
+- build `cdinit_manager` in a `colcon` workspace;
 - source setup script;
 - run `cdinit.sh start cdinit_timeout CDINIT_TIMEOUT=1` -- here `timeout` is an
   example service, `CDINIT_TIMEOUT` is passed to the service as an environment
@@ -145,6 +145,29 @@ Extra features
 - `cdinit.sh listall` lists all services found in cdinit service directories.
 - `cdinit.sh graph` outputs service dependency graph in graphviz dot format
   using `cdinit_graph.py` utility.
+
+
+Predefined services
+-------------------
+
+### `cdinit_manager` package
+
+- `cdinit_main` -- dummy main service;
+- `cdinit_log@<service>` -- consumes output of another service and writes it to
+  a log file with timestamps;
+- `cdinit_sessionsync` -- periodically runs `sync` on the session root folder
+  in order to minimize losses;
+- `cdinit_shutdown` -- shutdowns cdinit, to be used by other services, e.g., on
+  failures;
+- `cdinit_timeout` -- shutdown cdinit with a given timeout;
+- `cdinit_log_follow@<service>` -- follow log file of the given service and
+  output it to the terminal;
+- `cdinit_print_env` -- prints environment of the current cdinit session.
+
+### `cdinit_ros2` package
+
+- `cdinit_ros2_bag` records most of ROS2 topics to an MCAP bag file, tries to
+  exclude heavy visual topics.
 
 
 TODO

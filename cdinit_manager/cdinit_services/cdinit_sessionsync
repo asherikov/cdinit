@@ -1,0 +1,3 @@
+type = process
+command = sh -xc "while true; do sleep 0.1; sync --file-system '${CDINIT_SESSION_ROOT}' || true; done"
+#options = shares-console

@@ -1,0 +1,2 @@
+# https://github.com/ros2/rosbag2/tree/rolling/rosbag2_storage_mcap
+noChunking: true

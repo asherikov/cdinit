@@ -1,0 +1,5 @@
+type = process
+command = tail -F "${CDINIT_SESSION_ROOT}/$1.log"
+options = runs-on-console unmask-intr start-interruptible
+depends-on: $1
+depends-on: cdinit_log@$1

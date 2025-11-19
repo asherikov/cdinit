@@ -1,3 +1,4 @@
 type = process
-command = cdinit_log_helper.sh $1
+command = sh -c "ts '%.s' | cat >> '${CDINIT_SESSION_ROOT}/$1.log'"
 consumer-of = $1
+depends-ms = cdinit_sessionsync

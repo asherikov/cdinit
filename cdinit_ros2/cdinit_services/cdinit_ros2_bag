@@ -1,0 +1,17 @@
+type = process
+command = ros2 bag record \
+    --max-cache-size 0 \
+    --compression-queue-size 0 \
+    --include-hidden-topics --all \
+    --exclude-regex "(.*rosout.*)|(.*camera.*)|(.*lidar.*)|(.*cloud.*)" \
+    --storage mcap \
+    --storage-config-file "${CDINIT_INSTALL_ROOT}/share/cdinit_ros2/config/mcap_bag.yaml"
+
+stop-timeout = 20.0
+
+working-dir = ${CDINIT_SESSION_ROOT}
+
+depends-ms = cdinit_log@cdinit_ros2_bag
+depends-ms = cdinit_sessionsync
+
+#options = shares-console
