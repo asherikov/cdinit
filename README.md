@@ -49,11 +49,17 @@ designed for service management:
   practice this results in application logic leaks into startup scripts,
   turning the whole system into a spaghetti monster.
 
+- ROS launch is hierarchical in nature and relies on script inclusion, which is
+  fragile and dangerous in ROS2 due to shared scope
+  <https://github.com/ros2/launch/issues/815>.
+
+- Combination of scripting and hierarchical inclusions results in strongly
+  coupled startup scripts with obscure interdependencies. This, in turn,
+  prohibits fine control over individual nodes, such as stopping, restarting,
+  etc.
+
 - ROS2 python launch scripts are excessively verbose, e.g., see discussion at
   <https://github.com/dfki-ric/better_launch>.
-
-- ROS launch relies on script inclusion, which is fragile and dangerous in ROS2
-  due to shared scope <https://github.com/ros2/launch/issues/815>.
 
 - It is common to use multiple launch scripts in order to make software stack
   more manageable, e.g., in order to make logs readable or be able to restart
@@ -143,8 +149,9 @@ Extra features
 --------------
 
 - `cdinit.sh listall` lists all services found in cdinit service directories.
-- `cdinit.sh graph [services]` outputs service dependency graph in graphviz dot
-  format using `cdinit_graph.py` utility.
+- `cdinit.sh graph [services]` outputs service dependency graph in hiearch
+  (<https://github.com/asherikov/hiearch>) format using `cdinit_graph.py`
+  utility.
 
 
 Predefined services
@@ -173,14 +180,20 @@ Predefined services
 TODO
 ====
 
-I would like to see a few features implemented in `dinit`, but the author only
-accepts pull requests:
+A few things that would be nice to see implemented in dinit:
 
 - Automatically generated log file names, e.g., `<prefix specified via command
   line>/<service name>.log`, to avoid boilerplate parameters in service files.
-- Timestamp log messages.
+- Timestamped log messages.
 - `dinitctl` to optionally wait for control socket to be created.
 - Introduce a naming convention, e.g., '@' suffix, to separate parametrized
   services from basic ones: currently service file needs top be checked for
-  parameter
-  substitutions.
+  parameter substitutions. Similar to systemd service templates.
+
+
+Bookmarks
+=========
+
+- https://github.com/Supervisor/supervisor uses a single configration file.
+- https://shepherding.services/ Guile Scheme.
+- https://github.com/immortal/immortal
