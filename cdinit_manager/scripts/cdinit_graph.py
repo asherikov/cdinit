@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Parse dinit service files and generate a dependency graph in Graphviz dot format.
+Parse dinit service files and generate a dependency graph in hiearch YAML format.
 
 This script traverses a set of directories, parses dinit service files,
-builds a dependency graph, and outputs it in Graphviz dot format.
+builds a dependency graph, and outputs it in hiearch YAML format for use with hiearch.
 """
 
 import argparse
 import os
 import re
 import sys
+import yaml
 
 
 def parse_service_file(file_path):
@@ -34,6 +35,7 @@ def parse_service_file(file_path):
     }
 
     service_type = 'process'  # Default service type
+    has_parameters = False  # Flag to detect if the service supports arguments
 
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -43,7 +45,7 @@ def parse_service_file(file_path):
         sys.stderr.write(f'Warning: Could not read file {file_path}\n')
         service_name = os.path.basename(file_path)
         service_name = service_name.split('@')[0] if '@' in service_name else service_name
-        return {'name': service_name, 'type': service_type, 'dependencies': dependencies}
+        return {'name': service_name, 'type': service_type, 'dependencies': dependencies, 'has_parameters': has_parameters}
 
     current_line = 0
     lines = content.splitlines()
@@ -62,12 +64,15 @@ def parse_service_file(file_path):
             # For now, we'll just skip them
             continue
 
+        # Check if this line contains parameter references (like $1, $2, $3 etc.)
+        if re.search(r'\$\d+', line):
+            has_parameters = True
+
         # Match property patterns
         # Format: property = value or property: value
         match = re.match(r'^([a-zA-Z0-9._-]+)\s*([:=])\s*(.*)$', line)
         if match:
             prop_name = match.group(1).strip()
-            # separator = match.group(2)  # This variable was unused
             value = match.group(3).strip()
 
             # Remove trailing comments
@@ -91,7 +96,14 @@ def parse_service_file(file_path):
                 # Add dependencies (space-separated values)
                 deps = full_value.split()
                 # Filter out parameters after @ symbol in dependency names
-                filtered_deps = [dep.split('@')[0] if '@' in dep else dep for dep in deps]
+                # Also filter out any parameter placeholders like $1, $2, etc.
+                filtered_deps = []
+                for dep in deps:
+                    # Remove @ parameters
+                    dep = dep.split('@')[0] if '@' in dep else dep
+                    # Skip parameter placeholders like $1, $2, etc.
+                    if not dep.startswith('$'):
+                        filtered_deps.append(dep)
                 dependencies[prop_name].extend(filtered_deps)
 
     # Extract service name without parameters (before @ symbol)
@@ -101,7 +113,8 @@ def parse_service_file(file_path):
     return {
         'name': service_name,
         'type': service_type,
-        'dependencies': dependencies
+        'dependencies': dependencies,
+        'has_parameters': has_parameters
     }
 
 
@@ -154,44 +167,44 @@ def expand_directory_dependencies(directory_dep_path, service_dir):
     return services
 
 
-def get_color_for_service_type(service_type):
+def get_style_for_service_type(service_type):
     """
-    Get a color for a given service type.
+    Get a hiearch style for a given service type.
 
     Args:
         service_type (str): Type of the service
 
     Returns:
-        str: Color name/HEX code for the service type
+        str: Style name for the service type
     """
-    color_map = {
-        'process': 'lightblue',
-        'bgprocess': 'lightgreen',
-        'scripted': 'lightyellow',
-        'internal': 'lightgray',
-        'triggered': 'lightpink',
-        'unknown': 'white',  # For missing dependencies
+    style_map = {
+        'process': 'hh_dinit_process',
+        'bgprocess': 'hh_dinit_bgprocess',
+        'scripted': 'hh_dinit_scripted',
+        'internal': 'hh_dinit_internal',
+        'triggered': 'hh_dinit_triggered',
+        'unknown': 'hh_dinit_unknown',  # For missing dependencies
     }
-    return color_map.get(service_type, 'white')
+    return style_map.get(service_type, 'hh_dinit_unknown')
 
 
-def get_arrowhead_for_dependency_type(dep_type):
+def get_edge_style_for_dependency_type(dep_type):
     """
-    Get an arrowhead type for a given dependency type.
+    Get a hiearch edge style for a given dependency type.
 
     Args:
         dep_type (str): Type of the dependency
 
     Returns:
-        str: Arrowhead type for the dependency
+        str: Edge style name for the dependency
     """
-    arrowhead_map = {
-        'depends-on': 'normal',      # Standard dependency
-        'depends-ms': 'dot',         # Milestone dependency
-        'waits-for': 'diamond',      # Waits-for dependency
-        'after': 'tee',              # Ordering dependency
+    edge_style_map = {
+        'depends-on': 'hh_dinit_depends_on',      # Standard dependency
+        'depends-ms': 'hh_dinit_depends_ms',      # Milestone dependency
+        'waits-for': 'hh_dinit_waits_for',        # Waits-for dependency
+        'after': 'hh_dinit_after',                # Ordering dependency
     }
-    return arrowhead_map.get(dep_type, 'normal')
+    return edge_style_map.get(dep_type, 'hh_dinit_depends_on')
 
 
 def add_dependency_edges(service_name, dependencies, service_dir, nodes, edges):
@@ -205,24 +218,24 @@ def add_dependency_edges(service_name, dependencies, service_dir, nodes, edges):
                 for expanded_dep in expanded_deps:
                     # Always add the dependency as a node, regardless of whether it exists in scanned files
                     if expanded_dep not in nodes:
-                        nodes[expanded_dep] = 'unknown'  # Default type for missing dependencies
+                        nodes[expanded_dep] = ('unknown', False)  # Default type for missing dependencies
                     edges.add((service_name, expanded_dep, dep_type))
             else:
                 # Regular dependency - always add as a node even if not found in scanned files
                 if dep not in nodes:
-                    nodes[dep] = 'unknown'  # Default type for missing dependencies
+                    nodes[dep] = ('unknown', False)  # Default type for missing dependencies
                 edges.add((service_name, dep, dep_type))
 
     # Handle 'after' dependencies (ordering, but still represent as edges)
     for dep in dependencies['after']:
         if dep not in nodes:
-            nodes[dep] = 'unknown'  # Default type for missing dependencies
+            nodes[dep] = ('unknown', False)  # Default type for missing dependencies
         edges.add((service_name, dep, 'after'))
 
     # Handle 'before' dependencies (reverse of after)
     for dep in dependencies['before']:
         if dep not in nodes:
-            nodes[dep] = 'unknown'  # Default type for missing dependencies
+            nodes[dep] = ('unknown', False)  # Default type for missing dependencies
         edges.add((dep, service_name, 'after'))  # before is reverse of after
 
 
@@ -234,18 +247,20 @@ def build_dependency_graph(service_files):
         service_files (list): List of service file paths
 
     Returns:
-        tuple: (nodes, edges) where nodes is a dict mapping service names to types and
+        tuple: (nodes, edges) where nodes is a dict mapping service names to types and parametric info and
                edges is a list of (source, target, dependency_type) tuples
     """
-    nodes = {}  # Dictionary to store service name -> type mapping
+    # Dictionary to store service name -> (type, has_parameters)
+    nodes = {}
     edges = set()  # Using set to avoid duplicate edges
 
-    # First pass: collect all service names and their types
+    # First pass: collect all service names and their types and parametric information
     for service_file in service_files:
         service_info = parse_service_file(service_file)
         service_name = service_info['name']
         service_type = service_info['type']
-        nodes[service_name] = service_type
+        has_parameters = service_info['has_parameters']
+        nodes[service_name] = (service_type, has_parameters)
 
     # Second pass: parse dependencies and build edges
     for service_file in service_files:
@@ -259,91 +274,77 @@ def build_dependency_graph(service_files):
     return nodes, list(edges)
 
 
-def generate_dot_format(nodes, edges):
+def generate_hiearch_format(nodes, edges, target_services=None):
     """
-    Generate Graphviz dot format from nodes and edges.
+    Generate hiearch YAML format from nodes and edges.
 
     Args:
-        nodes (dict): Dictionary of service names to their types
+        nodes (dict): Dictionary of service names to (their types, has_parameters)
         edges (list): List of (source, target, dependency_type) tuples
+        target_services (list): List of target services to create a dedicated view for (None if all services)
 
     Returns:
-        str: Graphviz dot format string
+        str: hiearch YAML format string
     """
-    dot_lines = ['digraph DinitServices {']
-    dot_lines.append('    rankdir=TB;')
-    dot_lines.append('    node [shape=box, style=rounded];')
+    hiearch_data = {
+        'nodes': [],
+        'edges': [],
+        'views': []
+    }
 
-    # Add nodes with colors based on service type
-    for service_name, service_type in sorted(nodes.items()):
-        # Escape special characters for Graphviz
-        escaped_name = service_name.replace('"', '\\"')
-        color = get_color_for_service_type(service_type)
-        dot_lines.append(f'    "{escaped_name}" [label="{escaped_name}", fillcolor="{color}", style="rounded,filled"];')
+    # Add nodes with styles based on service type
+    for service_name, (service_type, has_parameters) in sorted(nodes.items()):
+        # Add "@" suffix to service name if it supports parameters
+        display_name = service_name + "@" if has_parameters else service_name
+        style = get_style_for_service_type(service_type)
+        hiearch_data['nodes'].append({
+            'id': [display_name, service_name],  # [label, unique id] - label shows @ if parametric, id stays the same
+            'style_notag': style
+        })
 
-    # Add edges with different arrowheads based on dependency type
+    # Add edges with different styles based on dependency type
     for source, target, dep_type in edges:
-        escaped_source = source.replace('"', '\\"')
-        escaped_target = target.replace('"', '\\"')
-        arrowhead = get_arrowhead_for_dependency_type(dep_type)
-        dot_lines.append(f'    "{escaped_source}" -> "{escaped_target}" [arrowhead="{arrowhead}"];')
+        edge_style = get_edge_style_for_dependency_type(dep_type)
+        # Use actual node IDs in the link, not display names (the display names are for the nodes themselves)
+        hiearch_data['edges'].append({
+            'link': [source, target],  # Use actual node IDs, not display names
+            'style': edge_style
+        })
 
-    dot_lines.append('}')
+    # Create view(s) based on whether specific services were selected
+    if target_services:
+        # Create a dedicated view for the selected services and their dependencies
+        hiearch_data['views'].append({
+            'id': 'dinit_service_selection',
+            'nodes': target_services,
+            'neighbours': 'recursive_out',
+            'style': 'hh_dinit_service_view'
+        })
 
-    return '\n'.join(dot_lines)
+        # Also create an "all services" view
+        hiearch_data['views'].append({
+            'id': 'dinit_service_all',
+            'style': 'hh_dinit_service_view',
+            'tags': ['default']
+        })
+    else:
+        # Create a default view for all services
+        hiearch_data['views'].append({
+            'id': 'dinit_service_all',
+            'style': 'hh_dinit_service_view',
+            'tags': ['default']
+        })
+
+    # Use safe_dump to avoid issues with special YAML characters
+    return yaml.safe_dump(hiearch_data, default_flow_style=False, allow_unicode=True)
 
 
-def filter_graph_to_services(nodes, edges, target_services):
-    """
-    Filter the dependency graph to only include specified services and their dependencies.
-    Only the selected services and services they depend on should be visualized,
-    services that depend on selected services should be omitted.
-
-    Args:
-        nodes (dict): Dictionary mapping service names to types
-        edges (list): List of (source, target, dependency_type) tuples
-        target_services (list): List of service names to include in the filtered graph
-
-    Returns:
-        tuple: (filtered_nodes, filtered_edges) containing only the services and their dependencies
-    """
-    # Start with the target services
-    all_relevant_services = set(target_services)
-
-    # Keep adding dependencies until no new ones are found
-    # Only add services that the current services depend ON (not services that depend on them)
-    changed = True
-    while changed:
-        changed = False
-        new_services = set()
-
-        for source, target, dep_type in edges:
-            # Only add the target if source is in our graph and target is not
-            # This means we're following dependency arrows FROM our selected services
-            if source in all_relevant_services and target not in all_relevant_services:
-                new_services.add(target)
-                changed = True
-
-        all_relevant_services.update(new_services)
-
-    # Filter nodes to only include relevant services
-    filtered_nodes = {name: nodes[name] for name in all_relevant_services if name in nodes}
-
-    # Filter edges to only include those between relevant services
-    # Only keep edges where both source and target are in our relevant services set
-    filtered_edges = [
-        (source, target, dep_type)
-        for source, target, dep_type in edges
-        if source in all_relevant_services and target in all_relevant_services
-    ]
-
-    return filtered_nodes, filtered_edges
 
 
 def main():
     """Parse command line arguments and generate the dependency graph."""
     parser = argparse.ArgumentParser(
-        description='Parse dinit service files and generate a dependency graph in Graphviz dot format.'
+        description='Parse dinit service files and generate a dependency graph in hiearch YAML format.'
     )
     parser.add_argument(
         '-d', '--directories',
@@ -375,13 +376,11 @@ def main():
     # Build the dependency graph
     nodes, edges = build_dependency_graph(service_files)
 
-    # If specific service names were provided, filter the graph to only include those services and their dependencies
-    if args.services:
-        nodes, edges = filter_graph_to_services(nodes, edges, args.services)
+    # Generate and output the hiearch format to the specified output
+    # Service filtering is handled automatically by hiearch based on view parameters
+    hiearch_output = generate_hiearch_format(nodes, edges, target_services=args.services)
 
-    # Generate and output the dot format to the specified output
-    dot_output = generate_dot_format(nodes, edges)
-    args.output.write(dot_output)
+    args.output.write(hiearch_output)
 
     if args.output != '-':
         args.output.close()
