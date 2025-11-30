@@ -21,7 +21,7 @@ else
 fi
 
 CDINIT_SOCKET="${CDINIT_WORKING_ROOT}/socket"
-CDINITCTL=(dinitctl --socket-path "${CDINIT_SOCKET}")
+CDINITCTL=(cdinitctl --socket-path "${CDINIT_SOCKET}")
 ###
 
 
@@ -78,7 +78,7 @@ case "${CDINIT_ARGS[0]}" in
             ###
 
 
-            dinit \
+            cdinit \
                 "${CDINIT_SERVICE_DIRS_ARGS[@]}" \
                 --socket-path "${CDINIT_SOCKET}" \
                 --log-file "${CDINIT_WORKING_ROOT}/log" \

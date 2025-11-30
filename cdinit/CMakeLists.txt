@@ -34,26 +34,26 @@ include_directories(
 )
 
 
-add_executable(dinitctl
+add_executable(cdinitctl
     dinit/src/dinitctl.cc
     dinit/src/options-processing.cc
     dinit/src/settings.cc
     ${DINIT_CONFIG_HEADER}
 )
 
-add_executable(dinitcheck
+add_executable(cdinitcheck
     dinit/src/dinitcheck.cc
     dinit/src/options-processing.cc
     dinit/src/settings.cc
     ${DINIT_CONFIG_HEADER}
 )
 
-add_executable(dinitmonitor
+add_executable(cdinitmonitor
     dinit/src/dinit-monitor.cc
     ${DINIT_CONFIG_HEADER}
 )
 
-add_executable(dinit
+add_executable(cdinit
     dinit/src/dinit.cc
     dinit/src/load-service.cc
     dinit/src/service.cc
@@ -76,7 +76,7 @@ add_executable(dinit
 ## Install ##
 #############
 
-install(TARGETS dinit dinitctl dinitcheck
+install(TARGETS cdinit cdinitctl cdinitcheck cdinitmonitor
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
