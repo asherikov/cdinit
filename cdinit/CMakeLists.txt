@@ -81,3 +81,20 @@ install(TARGETS cdinit cdinitctl cdinitcheck cdinitmonitor
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
+
+#############
+## Install Scripts and Services ##
+#############
+
+install(PROGRAMS
+    scripts/cdinit.sh
+    scripts/cdinit_graph.py
+    DESTINATION bin
+)
+
+foreach(DIR cdinit_services)
+    install(DIRECTORY ${DIR}
+        DESTINATION share/${PROJECT_NAME}/
+        USE_SOURCE_PERMISSIONS
+    )
+endforeach()

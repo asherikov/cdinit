@@ -10,6 +10,7 @@ import argparse
 import os
 import re
 import sys
+
 import yaml
 
 
@@ -295,7 +296,7 @@ def generate_hiearch_format(nodes, edges, target_services=None):
     # Add nodes with styles based on service type
     for service_name, (service_type, has_parameters) in sorted(nodes.items()):
         # Add "@" suffix to service name if it supports parameters
-        display_name = service_name + "@" if has_parameters else service_name
+        display_name = service_name + '@' if has_parameters else service_name
         style = get_style_for_service_type(service_type)
         hiearch_data['nodes'].append({
             'id': [display_name, service_name],  # [label, unique id] - label shows @ if parametric, id stays the same

@@ -9,15 +9,14 @@ complementing launching mechanisms used in robotics applications: `roslaunch`,
 Packages
 --------
 
-- `cdinit/` -- dinit executables
-- `cdinit_manager/` -- helper scripts
+- `cdinit/` -- dinit executables with management scripts
 - `cdinit_ros2/` -- ROS2 common unit scripts
 
 Example
 -------
 
 Steps:
-- build `cdinit_manager` in a `colcon` workspace;
+- build `cdinit` in a `colcon` workspace;
 - source setup script;
 - run `cdinit.sh start cdinit_timeout CDINIT_TIMEOUT=1` -- here `timeout` is an
   example service, `CDINIT_TIMEOUT` is passed to the service as an environment
@@ -157,7 +156,7 @@ Extra features
 Predefined services
 -------------------
 
-### `cdinit_manager` package
+### `cdinit` package
 
 - `cdinit_main` -- dummy main service;
 - `cdinit_log@<service>` -- consumes output of another service and writes it to

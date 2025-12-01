@@ -12,7 +12,7 @@
 
     <buildtool_depend>cmake</buildtool_depend>
 
-    <exec_depend>cdinit_manager</exec_depend>
+    <exec_depend>cdinit</exec_depend>
     <exec_depend>ros2bag</exec_depend>
     <exec_depend>rosbag2_storage_mcap</exec_depend>
 </package>
