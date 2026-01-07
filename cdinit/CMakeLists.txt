@@ -88,7 +88,6 @@ install(TARGETS cdinit cdinitctl cdinitcheck cdinitmonitor
 
 install(PROGRAMS
     scripts/cdinit.sh
-    scripts/cdinit_graph.py
     DESTINATION bin
 )
 

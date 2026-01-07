@@ -149,8 +149,8 @@ Extra features
 
 - `cdinit.sh listall` lists all services found in cdinit service directories.
 - `cdinit.sh graph [services]` outputs service dependency graph in hiearch
-  (<https://github.com/asherikov/hiearch>) format using `cdinit_graph.py`
-  utility.
+  (<https://github.com/asherikov/hiearch>) format using `dinit_graph` utility
+  (<https://github.com/asherikov/dinit_graph>).
 
 
 Predefined services

@@ -58,7 +58,7 @@ case "${CDINIT_ARGS[0]}" in
         ;;
 
     graph)
-        cdinit_graph.py --directories "${CDINIT_SERVICE_DIRS[@]}" --services "${CDINIT_ARGS[@]:1}"
+        dinit_graph --directories "${CDINIT_SERVICE_DIRS[@]}" --services "${CDINIT_ARGS[@]:1}"
         exit 0
         ;;
 
