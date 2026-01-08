@@ -112,6 +112,14 @@ fi
 # Execute command
 if [ "${#CDINIT_ARGS[@]}" -gt 0 ] && [ "${CDINIT_ARGS[0]}" != "" ]
 then
-    "${CDINITCTL[@]}" "${CDINIT_SERVICE_DIRS_ARGS[@]}" "${CDINIT_ARGS[@]}"
+    case "${CDINIT_ARGS[0]}" in
+        start)
+            for SERVICE in "${CDINIT_ARGS[@]:1}";
+            do
+                "${CDINITCTL[@]}" "${CDINIT_SERVICE_DIRS_ARGS[@]}" start "${SERVICE}"
+            done
+            ;;
+        *)      "${CDINITCTL[@]}" "${CDINIT_SERVICE_DIRS_ARGS[@]}" "${CDINIT_ARGS[@]}";;
+    esac
 fi
 ###
