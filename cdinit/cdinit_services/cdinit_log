@@ -1,4 +1,4 @@
 type = process
-command = sh -c "ts '%.s' | cat >> '${CDINIT_SESSION_ROOT}/$1.log'"
+command = sh -c "ts '%.s' | cat >> '${CDINIT_SESSION_ROOT}'/`echo '$1' | sed 's=/=_=g'`.log"
 consumer-of = $1
 depends-ms = cdinit_sessionsync
