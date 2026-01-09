@@ -84,15 +84,27 @@ case "${CDINIT_ARGS[0]}" in
                 --log-file "${CDINIT_WORKING_ROOT}/log" \
                 --user \
                 cdinit_main &
+
             while ! "${CDINITCTL[@]}" list &> /dev/null
             do
                 sleep 0.1
             done
 
-            "${CDINITCTL[@]}" setenv "CDINIT_INSTALL_ROOT=${CDINIT_INSTALL_ROOT}"
-            "${CDINITCTL[@]}" setenv "CDINIT_WORKING_ROOT=${CDINIT_WORKING_ROOT}"
-            "${CDINITCTL[@]}" setenv "CDINIT_SESSION_ROOT=${CDINIT_SESSION_ROOT}"
-            "${CDINITCTL[@]}" setenv "CDINIT_SESSION_ID=${CDINIT_SESSION_ID}"
+            # Determine installation root for each package: there may be
+            # multiple options in overlayed ROS setups.
+            IFS=':' read -ra INSTALL_PATHS <<< "${COLCON_PREFIX_PATH}:${AMENT_PREFIX_PATH}:${CDINIT_INSTALL_ROOT}"
+            for (( idx=${#INSTALL_PATHS[@]}-1 ; idx>=0 ; idx-- ))
+            do
+                find "${INSTALL_PATHS[idx]}/share" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" \
+                    | grep -v "ament" | grep -v "rosidl" \
+                    | xargs -I {} "${CDINITCTL[@]}" setenv "CDINIT_INSTALL_ROOT_PACKAGE_{}=${INSTALL_PATHS[idx]}"
+            done
+
+            "${CDINITCTL[@]}" setenv \
+                "CDINIT_INSTALL_ROOT=${CDINIT_INSTALL_ROOT}" \
+                "CDINIT_WORKING_ROOT=${CDINIT_WORKING_ROOT}" \
+                "CDINIT_SESSION_ROOT=${CDINIT_SESSION_ROOT}" \
+                "CDINIT_SESSION_ID=${CDINIT_SESSION_ID}"
         fi;;
 
     *)
@@ -113,6 +125,9 @@ fi
 if [ "${#CDINIT_ARGS[@]}" -gt 0 ] && [ "${CDINIT_ARGS[0]}" != "" ]
 then
     case "${CDINIT_ARGS[0]}" in
+        setenv)
+            # do nothing, variables should already be parsed and set
+            ;;
         start)
             for SERVICE in "${CDINIT_ARGS[@]:1}";
             do

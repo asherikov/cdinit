@@ -1,0 +1,8 @@
+type = process
+command = sh -c "env | sort && sleep 1"
+
+log-type = pipe
+depends-ms = cdinit_log@cdinit_shutdown_debug
+
+options = always-chain
+chain-to = cdinit_shutdown
