@@ -18,9 +18,7 @@ Example
 Steps:
 - build `cdinit` in a `colcon` workspace;
 - source setup script;
-- run `cdinit.sh start cdinit_timeout CDINIT_TIMEOUT=1` -- here `timeout` is an
-  example service, `CDINIT_TIMEOUT` is passed to the service as an environment
-  variable.
+- run `cdinit.sh start cdinit_timeout@1`.
 
 Dependencies
 ------------
@@ -165,7 +163,7 @@ Predefined services
   in order to minimize losses;
 - `cdinit_shutdown` -- shutdowns cdinit, to be used by other services, e.g., on
   failures;
-- `cdinit_timeout` -- shutdown cdinit with a given timeout;
+- `cdinit_timeout@<duration>` -- shutdown cdinit with a given timeout;
 - `cdinit_log_follow@<service>` -- follow log file of the given service and
   output it to the terminal;
 - `cdinit_print_env` -- prints environment of the current cdinit session.

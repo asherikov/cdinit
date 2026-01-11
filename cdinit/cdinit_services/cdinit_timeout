@@ -1,5 +1,5 @@
 type = process
-command = sleep $CDINIT_TIMEOUT
+command = sleep $1
 
 # ROS waits 15 second
 stop-timeout = 20.0
@@ -7,4 +7,3 @@ stop-timeout = 20.0
 # let it output to console
 options = always-chain
 chain-to = cdinit_shutdown
-depends-ms = cdinit_log@cdinit_timeout
