@@ -1,6 +1,6 @@
 # Dinit
 
-v0.19.5pre
+v0.20.0
 
 ---
 ![Dinit logo](doc/dinit-logo.png)
@@ -10,8 +10,9 @@ This is the README for Dinit, the service manager and init system. It is
 intended to provide an overview; For full documentation please check the manual pages. 
 The impatient may wish to check out the [getting started guide](doc/getting_started.md).
 
-Dinit is used as the init system for [Chimera Linux](https://chimera-linux.org/), and is an init
-system option for [Artix Linux](https://artixlinux.org/).
+Dinit is used as the init system for [Chimera Linux](https://chimera-linux.org/) and
+[eweOS](https://os.ewe.moe/), and is an init system option for [Artix Linux](https://artixlinux.org/).
+It is also packaged as a user service manager on many other OSes.
 
 ---
 
@@ -91,7 +92,7 @@ Full documentation for Dinit is available in the form of manual (man) pages:
   service description format and service settings
 - [dinitctl(8)](https://davmac.org/projects/dinit/man-pages-html/dinitctl.8.html) - _dinitctl_, a
   utility to control the dinit daemon and manage services
-- [dinitcheck(8)](https://davmac.org/projects/dinit/man-pages-html/dinitcheck.8.html) - _dinitcheck_,
+- [dinit-check(8)](https://davmac.org/projects/dinit/man-pages-html/dinit-check.8.html) - _dinit-check_,
   a utility to check service descriptions for errors/lint
 - [dinit-monitor(8)](https://davmac.org/projects/dinit/man-pages-html/dinit-monitor.8.html) -
   _dinit-monitor_, a utility to monitor a service and run a command when service state changes

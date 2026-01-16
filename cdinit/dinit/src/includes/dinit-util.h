@@ -7,12 +7,15 @@
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
+#include <limits>
+#include <type_traits>
 
 #include <cstring>
 #include <cstddef>
 #include <cerrno>
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <baseproc-sys.h>
@@ -130,12 +133,14 @@ inline std::string operator+(const std::string &a, const string_view &b)
 
 #if SUPPORT_CAPABILITIES
 // A thin wrapper around the cap_iab_t structure to manage ownership (supports move)
-struct cap_iab_wrapper {
+struct cap_iab_wrapper
+{
     cap_iab_wrapper() {}
+
+    // Construct IAB based on a textual representation. If this fails the wrapped cap_iab_t will
+    // be nullptr; in this case (it's not well documented but) errno should be EINVAL or ENOMEM.
     cap_iab_wrapper(std::string const &str) noexcept {
         if (str.empty()) return;
-        // this may end up being nullptr
-        // throwing from constructors is bad, so always check .get() afterwards
         iab = cap_iab_from_text(str.c_str());
     }
 
@@ -155,6 +160,7 @@ struct cap_iab_wrapper {
         if (iab) cap_free(iab);
     }
 
+    // Get wrapped capabilities; this is a pointer and will be null if invalid.
     cap_iab_t get() const noexcept {
         return iab;
     }
@@ -163,6 +169,48 @@ private:
     cap_iab_t iab = nullptr;
 };
 #endif
+
+// An owning wrapper around a file descriptor, ensuring that the descriptor is closed when the
+// wrapper is destroyed.
+class fd_holder
+{
+    int fd = -1;
+
+    public:
+    fd_holder() {}
+    fd_holder(int fd_v) : fd(fd_v) {}
+    fd_holder(fd_holder &&other) {
+        fd = other.fd;
+        other.fd = -1;
+    }
+
+    fd_holder &operator=(int fd_v)
+    {
+        if (fd != -1) bp_sys::close(fd);
+        fd = fd_v;
+        return *this;
+    }
+
+    fd_holder(const fd_holder &) = delete;
+    fd_holder &operator=(const fd_holder &) = delete;
+
+    ~fd_holder()
+    {
+        if (fd != -1) bp_sys::close(fd);
+    }
+
+    int get()
+    {
+        return fd;
+    }
+
+    int release()
+    {
+        int r = fd;
+        fd = -1;
+        return r;
+    }
+};
 
 // Complete read - read the specified size until end-of-file or error; continue read if
 // interrupted by signal.
@@ -218,7 +266,16 @@ inline std::string combine_paths(string_view p1, string_view p2)
 }
 
 // Find the parent path of a given path, which should refer to a named file or directory (not . or ..).
-// If the path contains no directory, returns the empty string.
+// If the path contains no directory, returns the empty string. If the path is in the root then return
+// "/". Otherwise return the original path with the trailing basename removed, and all trailing slashes
+// then removed.
+//
+// Examples:   "/a"        ->    "/"
+//             "/a/b/c"    ->    "/a/b"
+//             "foo"       ->    ""
+//             "foo/bar"   ->    "foo"
+//
+// Note: for a path that contains symbolic links, the returned parent path is not the "real path".
 inline string_view parent_path(string_view p)
 {
     auto spos = p.rfind('/');
@@ -226,7 +283,15 @@ inline string_view parent_path(string_view p)
         return string_view {};
     }
 
-    return p.substr(0, spos + 1);
+    // In case there are multiple slashes, remove the duplicates:
+    while (spos > 0 && p[spos - 1] == '/') --spos;
+
+    if (spos == 0) {
+        // special case (parent is root directory)
+        return {p.data(), 1};
+    }
+
+    return p.substr(0, spos);
 }
 
 // Find the base name of a path (the name after the final '/').
@@ -241,6 +306,188 @@ inline const char *base_name(const char *path) noexcept
     return basen;
 }
 
+// Read a symbolic link into a vector<char> (i.e. a string wrapped as a vector).
+// The string will have a terminating nul character.
+// Returns:
+//   A pair of {success, link string}; success is false on failure (errno set). On out-of-memory,
+//   the returned error is ENOMEM.
+//
+// Note: from C++17, this can be changed to return a string instead. Prior to that it is not
+// legal to write to a string via the data pointer.
+inline std::pair<bool, std::vector<char>> readlink_at_str(int dirfd, const char *path) noexcept
+{
+    struct stat sb;
+    if (bp_sys::fstatat(dirfd, path, &sb, AT_SYMLINK_NOFOLLOW) == -1) {
+        return {false, {}};
+    }
+
+    size_t vec_size = sb.st_size + 1; // add one for nul terminator
+
+    try {
+        std::vector<char> vec_str(vec_size);
+
+        try_read_link:
+
+        ssize_t r = bp_sys::readlinkat(dirfd, path, vec_str.data(), vec_size);
+
+        if (r < 0) {
+            return {false, {}};
+        }
+
+        if ((size_t)r > vec_size) {
+            // Our size estimate was off (link changed?), try again
+            vec_size = r;
+            vec_str.resize(vec_size);
+            goto try_read_link;
+        }
+
+        // shrink, or even expand (append nul) as necessary
+        vec_str.resize(r + 1);
+
+        return {true, std::move(vec_str)};
+    }
+    catch (std::bad_alloc &) {
+        errno = ENOMEM;
+        return {false, {}};
+    }
+}
+
+// Open a file and its (real) parent directory, at the same time. This is guaranteed to work even
+// if the path specifies a symbolic link (in this case, the parent directory is the parent of the
+// destination, not of the link). This function is designed to avoid races that can arise when
+// symlinks are present (eg even if you realpath a symlink, by the time you open that path any of
+// its components may have been replaced with another symlink; we avoid that by resolving symlinks
+// manually and opening the parent directory before the final path component).
+// Returns:
+//   A pair of file descriptors {parent dir fd, file fd}; on failure, {-1, errno}.
+inline std::pair<int,int> open_with_dir(const char *dirname, const char *basename,
+        int resolve_fd = AT_FDCWD) noexcept
+{
+    // For a file /x/y/z, if the final component 'z' is a link to /a/b/c, then the real parent
+    // directory is /a/b (not /x/y).
+
+    // This vector is used as backing for the next path if we need to "recurse" (i.e. if we need
+    // to manually follow a symlink).
+    std::vector<char> path_vec;
+
+    // Whether to close resolve_fd after use (initially false because it is supplied by caller,
+    // and we don't want to close the caller's fd):
+    bool close_resolve_fd = false;
+    bool close_parent_dir_fd;
+
+    long link_resolve_times = sysconf(_SC_SYMLOOP_MAX);
+
+    // strip the basename and open as a directory
+    #if defined(O_SEARCH)
+        constexpr int dir_search_flag = O_SEARCH;
+    #elif defined (O_PATH)
+        // O_SEARCH is not available on Linux, but O_PATH is; it's almost the same.
+        constexpr int dir_search_flag = O_PATH;
+    #else
+        // Neither O_SEARCH nor O_PATH are available on OpenBSD. We can use O_DIRECTORY but will
+        // have to specify an access mode (O_RDONLY).
+        constexpr int dir_search_flag = O_DIRECTORY | O_RDONLY;
+    #endif
+
+    begin:
+
+    int parent_dir_fd;
+    if (*dirname == '\0') {
+        parent_dir_fd = resolve_fd;
+        close_parent_dir_fd = close_resolve_fd;
+    }
+    else {
+        parent_dir_fd = bp_sys::openat(resolve_fd, dirname, dir_search_flag | O_DIRECTORY);
+        if (close_resolve_fd) bp_sys::close(resolve_fd);
+        if (parent_dir_fd == -1) {
+            return {-1, errno};
+        }
+        close_parent_dir_fd = true;
+    }
+
+    // open the final file (basename) without following symlinks
+    int file_fd = bp_sys::openat(parent_dir_fd, basename, O_RDONLY | O_NOFOLLOW);
+    if (file_fd == -1) {
+        if (errno == ELOOP) {
+            // It's a symlink
+            if (link_resolve_times == 0) {
+                // We've tried to resolve as many as the system normally would, so give up.
+                if (close_parent_dir_fd) bp_sys::close(parent_dir_fd);
+                return {-1, ELOOP};
+            }
+
+            link_resolve_times--;
+
+            // read the next path
+            auto link_path_r = readlink_at_str(parent_dir_fd, basename);
+            if (!link_path_r.first) {
+                // If EINVAL, it's supposedly not a symbolic link. Maybe it changed out from
+                // underneath us. The risk of handling this by looping back and trying as a file
+                // again seems greater than the risk that this will actually happen, so let's not
+                // worry about it, and just error out now:
+                if (close_parent_dir_fd) bp_sys::close(parent_dir_fd);
+                return {-1, errno};
+            }
+
+            // Ok, we successfully read the link target. We need to extract the parent directory
+            // name and base name, and then we'll jump back to 'begin' to iterate:
+            path_vec = std::move(link_path_r.second);
+            char *path = path_vec.data();
+            dirname = path;
+            basename = base_name(dirname);
+            if (basename == dirname) {
+                dirname = "";
+            }
+            else if (*basename == '\0') {
+                if (close_parent_dir_fd) bp_sys::close(parent_dir_fd);
+                return {-1, ENOENT};
+            }
+            else {
+                string_view path_ish {path, (size_t)(basename - path)};
+                string_view parent_path_v = parent_path(path_ish);
+                if (parent_path_v.length() == 1) {
+                    // Parent path must be '/'. Inserting nul might overwrite base name string,
+                    // so we need a separate string:
+                    dirname = "/";
+                }
+                else if (parent_path_v.empty()) {
+                    dirname = "";
+                }
+                else {
+                    path[parent_path_v.length()] = '\0';
+                }
+            }
+
+            resolve_fd = parent_dir_fd;
+            close_resolve_fd = true;
+            goto begin;
+        }
+
+        // Other errors: bail out
+        if (close_parent_dir_fd) bp_sys::close(parent_dir_fd);
+        return {-1, errno};
+    }
+
+    if (!close_parent_dir_fd) {
+        // If we never moved outside the parent directory (which may be AT_FDCWD, the current
+        // working directory) then we never opened a file descriptor for it. Do so now.
+        // (Note that doing this here isn't be thread-safe, since we are assuming that the CWD
+        // doesn't change during execution of this function. That doesn't matter for Dinit).
+        if (parent_dir_fd == AT_FDCWD) {
+            parent_dir_fd = bp_sys::open(".", dir_search_flag | O_DIRECTORY);
+        }
+        else {
+            parent_dir_fd = bp_sys::dup(parent_dir_fd);
+        }
+        if (parent_dir_fd == -1) {
+            bp_sys::close(file_fd);
+            return {-1, errno};
+        }
+    }
+
+    return {parent_dir_fd, file_fd};
+}
+
 // Check if one string starts with another
 inline bool starts_with(const std::string &s, const char *prefix) noexcept
 {
@@ -250,6 +497,140 @@ inline bool starts_with(const std::string &s, const char *prefix) noexcept
         sp++; prefix++;
     }
     return *prefix == 0;
+}
+
+// Numeric maximum as constexpr (not needed in C++14 which has constexpr std::max).
+template <typename T> constexpr
+T constexpr_max(T a, T b)
+{
+    return (a > b) ? a : b;
+}
+
+// Calculate (at compile-time) the maximum number of decimal digits that can be in a value of a
+// specific numeric type (not including minus sign, trailing nul terminator).
+template <typename T> constexpr
+typename std::enable_if<std::is_unsigned<T>::value, unsigned>::type
+type_max_num_digits(T num = std::numeric_limits<T>::max(),
+        unsigned pow = 0)
+{
+    return (num == 0) ? pow : type_max_num_digits<T>(num / 10, pow + 1);
+}
+
+// Specialise type_max_num_digits for signed types. Since the (absolute value of the) minimum can
+// be larger than the maximum, account for that before counting digits.
+template <typename T> constexpr
+typename std::enable_if<std::is_signed<T>::value, unsigned>::type
+type_max_num_digits()
+{
+    // For signed types, the absolute value of the minimum representable value may be larger than
+    // the maximum representable value. Base the digit calculation on whichever is larger.
+    using T_u = typename std::make_unsigned<T>::type;
+    return type_max_num_digits<T_u>(constexpr_max((T_u)std::numeric_limits<T>::max(),
+            (T_u)(-(T_u)std::numeric_limits<T>::min())), 0);
+}
+
+// Convert a value to a decimal representation. If negative, the representation will be lead with
+// a minus sign ('-'). The digits follow, with no separators; a nul terminator is appended.
+// Parameters:
+//   begin - where to store the decimal representation; sufficient space must be available in the
+//           buffer to store the complete representation including sign and nul terminator.
+//   val - the numeric value to convert to decimal
+// Returns:
+//   A pointer to the nul terminator at the end of the decimal.
+//
+// This avoids any reliance on standard library for output/formatting which may be affected by
+// locale (and for which implementations are heavy-weight due to locale support).
+template <typename T>
+inline char *to_dec_digits(char *begin, T val) noexcept
+{
+    // Use the unsigned type to hold the value as we process it, as it can deal with INT_MIN and
+    // similar values:
+    using unsigned_t = typename std::make_unsigned<T>::type;
+    unsigned_t uval;
+
+    char *cp = begin;
+
+    if (val < 0) {
+        *cp++ = '-';
+        uval = -(unsigned_t)val;
+    }
+    else {
+        uval = (unsigned_t)val;
+    }
+
+    if (uval == 0) {
+        *cp++ = '0';
+    }
+    else {
+        // Calculate the digits in reverse, then reverse them.
+        // First the calculation of digits:
+        char *first_digit = cp;
+        do {
+            unsigned digit_val = uval % 10u;
+            *cp++ = ('0' + digit_val);
+            uval /= 10u;
+        }
+        while (uval > 0);
+
+        // Reverse digits:
+        char *last_pos = cp;
+        last_pos--;
+        while (first_digit < last_pos) {
+            std::swap(*first_digit, *last_pos);
+            first_digit++;
+            last_pos--;
+        }
+    }
+
+    *cp = '\0';
+    return cp;
+}
+
+// Convenient wrapper holding a buffer for representing a number as a decimal
+template <typename T>
+struct dec_digits_buf
+{
+    char *end_ptr;
+    char buf[type_max_num_digits<T>() + (std::is_signed<T>::value ? 1 : 0) + 1];
+
+    dec_digits_buf(T value) noexcept
+    {
+        end_ptr = to_dec_digits(buf, value);
+    }
+};
+
+// buf_print: "print" a value (or series of values) into a buffer. The buffer must be sized
+// correctly prior. A nul terminator will be stored.
+// Parameters:
+//   buf - the buffer to "print" to
+//   values - the values to write to the buffer (integers as decimals)
+// Returns:
+//   A pointer to the nul terminator stored at the end of the output.
+
+template <typename T>
+typename std::enable_if<std::is_integral<T>::value, char *>::type
+buf_print(char *buf, T value) noexcept
+{
+    return to_dec_digits(buf, value);
+}
+
+inline char *buf_print(char *buf, const char *str) noexcept
+{
+    return stpcpy(buf, str);
+}
+
+inline char *buf_print(char *buf, char c) noexcept
+{
+    *buf++ = c;
+    *buf = '\0';
+    return buf;
+}
+
+template <typename T, typename ...U>
+char *buf_print(char *buf, T value, U... values) noexcept
+{
+    char *p = buf_print(buf, value);
+    return buf_print(p, values...);
 }
 
 // An allocator that doesn't value-initialise for construction. Eg for containers of primitive types this

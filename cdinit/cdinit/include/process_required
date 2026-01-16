@@ -1,0 +1,12 @@
+type = process
+
+stop-timeout = 20.0
+
+log-type = pipe
+load-options = export-service-name
+
+# ${DINIT_SERVICE} is not substituted
+#depends-ms = cdinit_log@${DINIT_SERVICE}
+
+options = always-chain
+chain-to = cdinit_shutdown_debug

@@ -59,11 +59,13 @@ eventloop_t event_loop(dasynq::delayed_init {});
 static void sigint_reboot_cb(eventloop_t &eloop) noexcept;
 static void sigquit_cb(eventloop_t &eloop) noexcept;
 static void sigterm_cb(eventloop_t &eloop) noexcept;
+static void sigusr1_cb(eventloop_t &eloop) noexcept;
 static bool open_control_socket(bool report_ro_failure = true) noexcept;
 static void close_control_socket() noexcept;
 static void control_socket_ready() noexcept;
 static void confirm_restart_boot() noexcept;
 static void flush_log() noexcept;
+static void do_soft_reboot(char **argv) noexcept;
 
 static void control_socket_cb(eventloop_t *loop, int fd) noexcept;
 
@@ -71,7 +73,7 @@ static void control_socket_cb(eventloop_t *loop, int fd) noexcept;
 static void find_cgroup_path() noexcept;
 #endif
 
-static void printVersion();
+static void print_version();
 
 // Variables
 
@@ -193,7 +195,7 @@ namespace {
 
     // These need to be at namespace scope to prevent causing stack allocations when using them:
     constexpr auto shutdown_exec = literal(SBINDIR) + "/" + SHUTDOWN_PREFIX + "shutdown";
-    constexpr auto dinit_exec = literal(SBINDIR) + "/" + "dinit";
+    constexpr auto dinit_exec = literal(BINDIR) + "/" + "dinit";
     constexpr auto error_exec_sd = literal("Error executing ") + shutdown_exec + ": ";
     constexpr auto error_exec_dinit = literal("Error executing ") + dinit_exec + ": ";
 }
@@ -219,7 +221,6 @@ static int process_commandline_arg(char **argv, int argc, int &i, options &opts)
 {
     using std::cerr;
     using std::cout;
-    using std::endl;
     using std::list;
 
     const char * &env_file = opts.env_file;
@@ -272,7 +273,7 @@ static int process_commandline_arg(char **argv, int argc, int &i, options &opts)
         }
         else if (strcmp(argv[i], "--services-dir") == 0 || strcmp(argv[i], "-d") == 0) {
             if (++i < argc && argv[i][0] != '\0') {
-                service_dir_opts.set_specified_service_dir(argv[i]);
+                service_dir_opts.add_specified_service_dir(argv[i]);
             }
             else {
                 cerr << "dinit: '--services-dir' (-d) requires an argument\n";
@@ -379,7 +380,7 @@ static int process_commandline_arg(char **argv, int argc, int &i, options &opts)
             }
         }
         else if (strcmp(argv[i], "--version") == 0) {
-            printVersion();
+            print_version();
             return -1;
         }
         else if (strcmp(argv[i], "--help") == 0) {
@@ -413,7 +414,7 @@ static int process_commandline_arg(char **argv, int argc, int &i, options &opts)
         else {
             // unrecognized
             if (!opts.process_sys_args) {
-                cerr << "dinit: unrecognized option: " << argv[i] << endl;
+                cerr << "dinit: unrecognized option: " << argv[i] << "\n";
                 return 1;
             }
         }
@@ -506,7 +507,7 @@ int dinit_main(int argc, char **argv)
         if (onefd > 2) close(onefd);
         if (twofd > 2) close(twofd);
 
-        if (! env_file_set) {
+        if (!env_file_set) {
             env_file = env_file_path;
         }
 
@@ -528,6 +529,7 @@ int dinit_main(int argc, char **argv)
         sigaddset(&sigwait_set, SIGCHLD);
         sigaddset(&sigwait_set, SIGINT);
         sigaddset(&sigwait_set, SIGTERM);
+        sigaddset(&sigwait_set, SIGUSR1);
     }
     sigprocmask(SIG_BLOCK, &sigwait_set, &orig_signal_mask);
 
@@ -565,6 +567,7 @@ int dinit_main(int argc, char **argv)
     callback_signal_handler sigterm_watcher {sigterm_cb};
     callback_signal_handler sigint_watcher;
     callback_signal_handler sigquit_watcher;
+    callback_signal_handler sigusr1_watcher {sigusr1_cb};
 
     if (am_system_mgr) {
         sigint_watcher.set_cb_func(sigint_reboot_cb);
@@ -576,7 +579,8 @@ int dinit_main(int argc, char **argv)
 
     sigint_watcher.add_watch(event_loop, SIGINT);
     sigterm_watcher.add_watch(event_loop, SIGTERM);
-    
+    sigusr1_watcher.add_watch(event_loop, SIGUSR1);
+
     if (am_system_mgr) {
         // PID 1: we may ask for console input; SIGQUIT exec's shutdown
         console_input_io.add_watch(event_loop, STDIN_FILENO, dasynq::IN_EVENTS, false);
@@ -642,7 +646,7 @@ int dinit_main(int argc, char **argv)
     }
 
     if (env_file != nullptr) {
-        read_env_file(env_file, true, main_env, false);
+        read_env_file(env_file, AT_FDCWD, true, main_env, false);
     }
 
     for (auto svc : services_to_start) {
@@ -714,10 +718,7 @@ int dinit_main(int argc, char **argv)
     
     if (am_system_mgr) {
         if (shutdown_type == shutdown_type_t::SOFTREBOOT) {
-            sync(); // Sync to minimise data loss in case soft-boot fails
-
-            execv(dinit_exec, argv);
-            log(loglevel_t::ERROR, error_exec_dinit, strerror(errno));
+            do_soft_reboot(argv);
 
             // if we get here, soft reboot failed; reboot normally
             log(loglevel_t::ERROR, "Could not soft-reboot. Will attempt reboot.");
@@ -819,8 +820,8 @@ static void confirm_restart_boot() noexcept
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_attr);
 
     // Set non-blocking mode
-    int origFlags = fcntl(STDIN_FILENO, F_GETFL);
-    fcntl(STDIN_FILENO, F_SETFL, origFlags | O_NONBLOCK);
+    int orig_flags = fcntl(STDIN_FILENO, F_GETFL);
+    fcntl(STDIN_FILENO, F_SETFL, orig_flags | O_NONBLOCK);
 
     do_prompt:
     std::cout << "Choose: (r)eboot, r(e)covery, re(s)tart boot sequence, (p)ower off? " << std::flush;
@@ -828,7 +829,7 @@ static void confirm_restart_boot() noexcept
     console_input_io.set_enabled(event_loop, true);
     do {
         event_loop.run();
-    } while (! console_input_ready && services->get_shutdown_type() == shutdown_type_t::NONE);
+    } while (!console_input_ready && services->get_shutdown_type() == shutdown_type_t::NONE);
     console_input_io.set_enabled(event_loop, false);
 
     // We either have input, or shutdown type has been set, or both.
@@ -865,7 +866,36 @@ static void confirm_restart_boot() noexcept
 
     term_attr.c_lflag |= ICANON;
     tcsetattr(STDIN_FILENO, TCSANOW, &term_attr);
-    fcntl(STDIN_FILENO, F_SETFL, origFlags);
+    fcntl(STDIN_FILENO, F_SETFL, orig_flags);
+}
+
+static void do_soft_reboot(char **argv) noexcept
+{
+    sync(); // Sync to minimise data loss in case soft-boot fails
+
+    // Fork-exec "shutdown --system -s", which will run any shutdown hooks.
+    int child_pid;
+    if ((child_pid = fork()) == 0) {
+        // child
+        execl(shutdown_exec.c_str(), shutdown_exec.c_str(), "--system", "-s", nullptr);
+        _exit(EXIT_FAILURE);
+    }
+    else if (child_pid < 0) {
+        log(loglevel_t::ERROR, error_exec_sd, strerror(errno));
+        flush_log();
+    }
+    else {
+        int wstatus;
+        waitpid(child_pid, &wstatus, 0);
+        if (wstatus != 0) {
+            log(loglevel_t::ERROR, "Execution of shutdown returned non-zero status");
+            flush_log();
+        }
+    }
+
+    // Re-exec the dinit process.
+    execv(dinit_exec, argv);
+    log(loglevel_t::ERROR, error_exec_dinit, strerror(errno));
 }
 
 // Callback for control socket
@@ -1207,9 +1237,9 @@ static void find_cgroup_path() noexcept
 
 #endif // SUPPORT_CGROUPS
 
-static void printVersion()
+static void print_version()
 {
-    std::cout << "Dinit version " << DINIT_VERSION << '.' << std::endl;
+    std::cout << "Dinit version " << DINIT_VERSION << ".\n";
     const unsigned feature_count = 0
 #if SUPPORT_CGROUPS
             +1
@@ -1254,13 +1284,13 @@ static void printVersion()
     }
 }
 
-/* handle SIGINT signal (generated by Linux kernel when ctrl+alt+del pressed) */
+// handle SIGINT signal (generated by Linux kernel when ctrl+alt+del pressed)
 static void sigint_reboot_cb(eventloop_t &eloop) noexcept
 {
     services->stop_all_services(shutdown_type_t::REBOOT);
 }
 
-/* handle SIGQUIT (if we are system init) */
+// handle SIGQUIT (if we are system init)
 static void sigquit_cb(eventloop_t &eloop) noexcept
 {
     // This performs an immediate shutdown, without service rollback.
@@ -1270,8 +1300,14 @@ static void sigquit_cb(eventloop_t &eloop) noexcept
     sync(); // since a hard poweroff might be required at this point...
 }
 
-/* handle SIGTERM/SIGQUIT(non-system-daemon) - stop all services and shut down */
+// handle SIGTERM/SIGQUIT(non-system-daemon) - stop all services and shut down
 static void sigterm_cb(eventloop_t &eloop) noexcept
 {
     services->stop_all_services();
+}
+
+// handle SIGUSR1 - attempt to (re)open control socket
+static void sigusr1_cb(eventloop_t &eloop) noexcept
+{
+    open_control_socket(true);
 }

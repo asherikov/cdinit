@@ -38,6 +38,8 @@
 #include <cstdio>
 #include <climits>
 
+#include <dinit-util.h>
+
 class service_set;
 
 enum class loglevel_t {
@@ -93,10 +95,8 @@ static inline void log_msg_begin(loglevel_t lvl, const std::string &str) noexcep
 
 static inline void log_msg_begin(loglevel_t lvl, int a) noexcept
 {
-    constexpr int bufsz = (CHAR_BIT * sizeof(int) - 1) / 3 + 2;
-    char nbuf[bufsz];
-    snprintf(nbuf, bufsz, "%d", a);
-    log_msg_begin(lvl, nbuf);
+    dec_digits_buf<int> dd_buf = a;
+    log_msg_begin(lvl, dd_buf.buf);
 }
 
 static inline void log_msg_part(const std::string &str) noexcept
@@ -106,10 +106,8 @@ static inline void log_msg_part(const std::string &str) noexcept
 
 static inline void log_msg_part(int a) noexcept
 {
-    constexpr int bufsz = (CHAR_BIT * sizeof(int) - 1) / 3 + 2;
-    char nbuf[bufsz];
-    snprintf(nbuf, bufsz, "%d", a);
-    log_msg_part(nbuf);
+    dec_digits_buf<int> dd_buf = a;
+    log_msg_part(dd_buf.buf);
 }
 
 static inline void log_msg_end(const std::string &str) noexcept
@@ -119,10 +117,8 @@ static inline void log_msg_end(const std::string &str) noexcept
 
 static inline void log_msg_end(int a) noexcept
 {
-    constexpr int bufsz = (CHAR_BIT * sizeof(int) - 1) / 3 + 2;
-    char nbuf[bufsz];
-    snprintf(nbuf, bufsz, "%d", a);
-    log_msg_end(nbuf);
+    dec_digits_buf<int> dd_buf = a;
+    log_msg_end(dd_buf.buf);
 }
 
 static inline void log_service_started(const std::string &str) noexcept

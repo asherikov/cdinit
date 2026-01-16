@@ -41,8 +41,9 @@ read -r -a CDINIT_ARGS <<< "$(echo "${CDINIT_ARGS[@]}" | sed "s/__[[:alnum:]_]\+
 ###
 # Find service directories
 CDINIT_INSTALL_ROOT=$(realpath "$(dirname "$0")/../")
+CDINIT_INCLUDE_DIR=${CDINIT_INSTALL_ROOT}/share/cdinit/cdinit/include
 IFS=":" read -r -a SEARCH_PATHS <<< "$(echo "${CDINIT_INSTALL_ROOT}:${ROS_PACKAGE_PATH}:${AMENT_PREFIX_PATH}" | sed -e "s/:\+/:/g" -e "s/^://" -e "s/:$//")"
-readarray -t CDINIT_SERVICE_DIRS <<< "$(find "${SEARCH_PATHS[@]}" -type d -name "cdinit_services" -print0 | xargs --no-run-if-empty -0 realpath | sort | uniq)"
+readarray -t CDINIT_SERVICE_DIRS <<< "$(find "${SEARCH_PATHS[@]}" -type d -path "*/cdinit/service" -print0 | xargs --no-run-if-empty -0 realpath | sort | uniq)"
 read -r -a CDINIT_SERVICE_DIRS_ARGS <<< "$(printf '%s\n' "${CDINIT_SERVICE_DIRS[@]}" | sed "s/^/--services-dir /" | tr '\n' ' ')"
 ###
 
@@ -102,6 +103,7 @@ case "${CDINIT_ARGS[0]}" in
 
             "${CDINITCTL[@]}" setenv \
                 "CDINIT_INSTALL_ROOT=${CDINIT_INSTALL_ROOT}" \
+                "CDINIT_INCLUDE_DIR=${CDINIT_INCLUDE_DIR}" \
                 "CDINIT_WORKING_ROOT=${CDINIT_WORKING_ROOT}" \
                 "CDINIT_SESSION_ROOT=${CDINIT_SESSION_ROOT}" \
                 "CDINIT_SESSION_ID=${CDINIT_SESSION_ID}"

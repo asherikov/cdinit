@@ -1,2 +1,0 @@
-#!/bin/sh
-daemon -p /var/run/dinit.pid dinit $@

@@ -24,7 +24,9 @@
 #include "load-service.h"
 #include "options-processing.h"
 
-// dinitcheck:  utility to check Dinit configuration for correctness/lint
+// dinit-check:  utility to check Dinit configuration for correctness/lint
+
+#define DINIT_CHECK_APPNAME "dinit-check"
 
 using string = std::string;
 using string_iterator = std::string::iterator;
@@ -90,74 +92,6 @@ static bool offline_operation = true;
 // environment - populated from running dinit instance if possible
 environment menv;
 
-// Get the environment from remote dinit instance
-static void get_remote_env(int csfd, cpbuffer_t &rbuffer)
-{
-    char buf[2] = { (char)cp_cmd::GETALLENV, 0 };
-    write_all_x(csfd, buf, 2);
-
-    wait_for_reply(rbuffer, csfd);
-
-    if (rbuffer[0] != (char)cp_rply::ALLENV) {
-        throw dinit_protocol_error();
-    }
-
-    // 1-byte packet header, then size_t data size
-    constexpr size_t allenv_hdr_size = 1 + sizeof(size_t);
-    rbuffer.fill_to(csfd, allenv_hdr_size);
-
-    size_t data_size;
-    rbuffer.extract(&data_size, 1, sizeof(data_size));
-    rbuffer.consume(allenv_hdr_size);
-
-    if (data_size == 0) return;
-
-    if (rbuffer.get_length() == 0) {
-        fill_some(rbuffer, csfd);
-    }
-
-    std::string env_var;
-
-    while (data_size > 0) {
-        // look for a nul terminator
-        get_var:
-        unsigned contig_len = rbuffer.get_contiguous_length(rbuffer.get_ptr(0));
-        unsigned check_len = std::min((size_t) contig_len, data_size);
-        for (unsigned i = 0; i < check_len; ++i) {
-            if (rbuffer[i] == '\0') {
-                // append the last portion
-                env_var.append(rbuffer.get_ptr(0), rbuffer.get_ptr(0) + i);
-                rbuffer.consume(i + 1);
-                data_size -= (i + 1);
-
-                menv.set_var(std::move(env_var));
-                env_var.clear();
-
-                if (data_size == 0) {
-                    // that's the last one
-                    return;
-                }
-
-                goto get_var;
-            }
-        }
-
-        // copy what we have so far to the string, and fill some more
-        env_var.append(rbuffer.get_ptr(0), rbuffer.get_ptr(0) + check_len);
-        rbuffer.consume(check_len);
-        data_size -= check_len;
-
-        if (data_size == 0) {
-            // This shouldn't happen, we didn't find the nul terminator at the end
-            throw dinit_protocol_error();
-        }
-
-        if (rbuffer.get_length() == 0) {
-            fill_some(rbuffer, csfd);
-        }
-    }
-}
-
 int main(int argc, char **argv)
 {
     using namespace std;
@@ -177,10 +111,10 @@ int main(int argc, char **argv)
                 // An option...
                 if (strcmp(argv[i], "--services-dir") == 0 || strcmp(argv[i], "-d") == 0) {
                     if (++i < argc && argv[i][0] != '\0') {
-                        service_dir_opts.set_specified_service_dir(argv[i]);
+                        service_dir_opts.add_specified_service_dir(argv[i]);
                     }
                     else {
-                        cerr << "dinitcheck: '--services-dir' (-d) requires an argument" << endl;
+                        cerr << DINIT_CHECK_APPNAME ": '--services-dir' (-d) requires an argument\n";
                         return 1;
                     }
                 }
@@ -193,7 +127,8 @@ int main(int argc, char **argv)
                 else if (strcmp(argv[i], "--socket-path") == 0 || strcmp(argv[i], "-p") == 0) {
                     ++i;
                     if (i == argc || argv[i][0] == '\0') {
-                        cerr << "dinitcheck: --socket-path/-p should be followed by socket path\n";
+                        cerr << DINIT_CHECK_APPNAME ": --socket-path/-p should be followed by "
+                                "socket path\n";
                         return 1;
                     }
                     control_socket_str = argv[i];
@@ -204,13 +139,14 @@ int main(int argc, char **argv)
                 else if (strcmp(argv[i], "--env-file") == 0 || strcmp(argv[i], "-e") == 0) {
                     ++i;
                     if (i == argc || argv[i][0] == '\0') {
-                        cerr << "dinitcheck: --env-file/-e should be followed by environment file path\n";
+                        cerr << DINIT_CHECK_APPNAME ": --env-file/-e should be followed by "
+                                "environment file path\n";
                         return 1;
                     }
                     env_file = argv[i];
                 }
                 else if (strcmp(argv[i], "--help") == 0) {
-                    cout << "dinitcheck: check dinit service descriptions\n"
+                    cout << DINIT_CHECK_APPNAME ": check dinit service descriptions\n"
                             " --help                       display help\n"
                             " --services-dir <dir>, -d <dir>\n"
                             "                              set base directory for service description\n"
@@ -227,7 +163,8 @@ int main(int argc, char **argv)
                     return EXIT_SUCCESS;
                 }
                 else {
-                    std::cerr << "dinitcheck: Unrecognized option: '" << argv[i] << "' (use '--help' for help)\n";
+                    std::cerr << DINIT_CHECK_APPNAME ": unrecognized option: '" << argv[i]
+                            << "' (use '--help' for help)\n";
                     return EXIT_FAILURE;
                 }
             }
@@ -254,20 +191,22 @@ int main(int argc, char **argv)
         }
         if (!env_file.empty()) {
             auto log_inv_env_setting = [&](int line_num) {
-                std::cerr << "dinitcheck: warning: Invalid environment variable setting in environment file "
-                        << env_file << " (line " << std::to_string(line_num) << ")\n";
+                std::cerr << DINIT_CHECK_APPNAME ": warning: invalid environment variable setting "
+                            "in environment file " << env_file << " (line "
+                        << line_num << ")\n";
             };
             auto log_bad_env_command = [&](int line_num) {
-                std::cerr << "dinitcheck: warning: Bad command in environment file "
-                        << env_file << " (line " << std::to_string(line_num) << ")\n";
+                std::cerr << DINIT_CHECK_APPNAME ": warning: bad command in environment file "
+                        << env_file << " (line " << line_num << ")\n";
             };
 
             try {
-                read_env_file_inline(env_file.c_str(), true, menv, false, log_inv_env_setting, log_bad_env_command);
+                read_env_file_inline(env_file.c_str(), AT_FDCWD, true, menv, false,
+                        log_inv_env_setting, log_bad_env_command);
             }
             catch (std::system_error &err) {
-                std::cerr << "dinitcheck: error read environment file " << env_file << ": "
-                        << err.code().message() << "\n";
+                std::cerr << DINIT_CHECK_APPNAME ": error reading environment file " << env_file
+                        << ": " << err.code().message() << "\n";
                 return EXIT_FAILURE;
             }
         }
@@ -279,8 +218,8 @@ int main(int argc, char **argv)
         else {
             control_socket_path = get_default_socket_path(control_socket_str, user_dinit);
             if (control_socket_path == nullptr) {
-                cerr << "dinitcheck: cannot locate user home directory (set XDG_RUNTIME_DIR, HOME, check /etc/passwd file, or "
-                        "specify socket path via -p)" << endl;
+                cerr << DINIT_CHECK_APPNAME ": cannot locate user home directory (set XDG_RUNTIME_DIR, HOME, check /etc/passwd file, or "
+                        "specify socket path via -p)\n";
                 return EXIT_FAILURE;
             }
         }
@@ -298,30 +237,30 @@ int main(int argc, char **argv)
             }
 
             menv.clear_no_inherit();
-            get_remote_env(socknum, rbuffer);
+            get_remote_env(socknum, rbuffer, menv);
         }
         catch (cp_old_client_exception &e) {
-            std::cerr << "dinitcheck: too old (daemon reports newer protocol version)" << std::endl;
+            std::cerr << DINIT_CHECK_APPNAME ": too old (daemon reports newer protocol version)\n";
             return EXIT_FAILURE;
         }
         catch (cp_old_server_exception &e) {
-            std::cerr << "dinitcheck: daemon too old or protocol error" << std::endl;
+            std::cerr << DINIT_CHECK_APPNAME ": daemon too old or protocol error\n";
             return EXIT_FAILURE;
         }
         catch (cp_read_exception &e) {
-            cerr << "dinitcheck: control socket read failure or protocol error" << endl;
+            cerr << DINIT_CHECK_APPNAME ": control socket read failure or protocol error\n";
             return EXIT_FAILURE;
         }
         catch (cp_write_exception &e) {
-            cerr << "dinitcheck: control socket write error: " << std::strerror(e.errcode) << endl;
+            cerr << DINIT_CHECK_APPNAME ": control socket write error: " << std::strerror(e.errcode) << "\n";
             return EXIT_FAILURE;
         }
         catch (dinit_protocol_error &e) {
-            cerr << "dinitcheck: protocol error" << endl;
+            cerr << DINIT_CHECK_APPNAME ": protocol error\n";
             return EXIT_FAILURE;
         }
         catch (general_error &ge) {
-            std::cerr << "dinitcheck";
+            std::cerr << DINIT_CHECK_APPNAME;
             if (ge.get_action() != nullptr) {
                 std::cerr << ": " << ge.get_action();
                 std::string &arg = ge.get_arg();
@@ -437,7 +376,7 @@ int main(int argc, char **argv)
 
     for (size_t i = 0; i < num_services_to_check; ++i) {
         service_record *root = service_set[services_to_check[i]];
-        if (! root) continue;
+        if (!root) continue;
         if (root->visited) continue;
 
         // invariant: service_chain is empty
@@ -467,7 +406,7 @@ int main(int argc, char **argv)
                 continue;
             }
             if (next_link->visited) {
-                if (! next_link->cycle_free) {
+                if (!next_link->cycle_free) {
                     // We've found a cycle. Clear entries before the beginning of the cycle, then
                     // exit the loop.
                     auto first = std::find_if(service_chain.begin(), service_chain.end(),
@@ -508,7 +447,7 @@ int main(int argc, char **argv)
 
     std::cerr << "Secondary checks complete.\n";
 
-    if (! errors_found) {
+    if (!errors_found) {
         std::cout << "No problems found.\n";
     }
     else {
@@ -564,7 +503,7 @@ static void report_dir_error(const char *service_name, const std::string &dirpat
 
 static void report_general_warning(string_view msg)
 {
-    std::cerr << "dinitcheck: Warning: " << msg.data() << "\n";
+    std::cerr << DINIT_CHECK_APPNAME ": warning: " << msg.data() << "\n";
 }
 
 // Process a dependency directory - filenames contained within correspond to service names which
@@ -625,8 +564,8 @@ service_record *load_service(service_set_t &services, const std::string &name,
 
     string service_wdir;
     string service_filename;
-    ifstream service_file;
-    int dirfd;
+    dio::istream service_file;
+    fd_holder sdf_parent_dir_fd;
 
     int fail_load_errno = 0;
     std::string fail_load_path;
@@ -640,11 +579,16 @@ service_record *load_service(service_set_t &services, const std::string &name,
         }
         service_filename += base_name;
 
-        service_file.open(service_filename.c_str(), ios::in);
-        if (service_file) break;
+        auto sdf_fds = open_with_dir(service_dir.get_dir(), ((std::string)base_name).c_str());
+        if (sdf_fds.first != -1) {
+            // Found
+            sdf_parent_dir_fd = sdf_fds.first;
+            service_file.set_fd(sdf_fds.second);
+            break;
+        }
 
-        if (errno != ENOENT && fail_load_errno == 0) {
-            fail_load_errno = errno;
+        if (sdf_fds.second != ENOENT && fail_load_errno == 0) {
+            fail_load_errno = sdf_fds.second;
             fail_load_path = std::move(service_filename);
         }
     }
@@ -664,7 +608,7 @@ service_record *load_service(service_set_t &services, const std::string &name,
 
     auto resolve_var = [&](const string &name) {
         if (offline_operation && !issued_var_subst_warning) {
-            report_general_warning("Variable substitution performed by dinitcheck "
+            report_general_warning("variable substitution performed by " DINIT_CHECK_APPNAME " "
                     "for file paths may not match dinit daemon (environment may differ); "
                     "use --online to avoid this warning");
             issued_var_subst_warning = true;
@@ -674,11 +618,8 @@ service_record *load_service(service_set_t &services, const std::string &name,
 
     service_settings_wrapper<prelim_dep> settings;
 
-    string line;
-    service_file.exceptions(ios::badbit);
-
     file_input_stack input_stack;
-    input_stack.push(std::move(service_filename), std::move(service_file));
+    input_stack.push(std::move(service_filename), std::move(service_file), sdf_parent_dir_fd.release());
 
     try {
         process_service_file(name, input_stack,
@@ -708,7 +649,10 @@ service_record *load_service(service_set_t &services, const std::string &name,
                         report_service_description_exc(exc);
                     }
                 },
-                service_arg.c_str(), resolve_var);
+                service_arg.c_str(), resolve_var,
+                [](string::iterator i, string::iterator e) -> void {
+                    // TODO: check valid (known) meta commands
+                });
     }
     catch (std::system_error &sys_err)
     {
@@ -718,6 +662,12 @@ service_record *load_service(service_set_t &services, const std::string &name,
 
     auto report_err = [&](const char *msg) {
         report_service_description_err(name, msg);
+    };
+
+    auto report_lint = [&](const char *msg) {
+        std::string s = "warning: ";
+        s += msg;
+        report_service_description_err(name, s.c_str());
     };
 
     environment srv_env{};
@@ -740,28 +690,32 @@ service_record *load_service(service_set_t &services, const std::string &name,
     }
 
     if (!settings.env_file.empty()) {
+        fd_holder env_resolve_fd = std::move(settings.env_file_dir_fd);
         try {
-            std::string fullpath = combine_paths(service_wdir, settings.env_file.c_str());
-
             auto log_inv_env_setting = [&](int line_num) {
                 report_service_description_err(name,
-                        std::string("Invalid environment variable setting in environment file " + fullpath
-                                + " (line ") + std::to_string(line_num) + ")");
+                        std::string("invalid environment variable setting in environment file "
+                                + settings.env_file + " (line ") + std::to_string(line_num)
+                                + ")");
             };
             auto log_bad_env_command = [&](int line_num) {
                 report_service_description_err(name,
-                        std::string("Bad command in environment file ") + fullpath + " (line " + std::to_string(line_num) + ")");
+                        std::string("bad command in environment file ") + settings.env_file
+                                + " (line " + std::to_string(line_num) + ")");
             };
 
-            read_env_file_inline(fullpath.c_str(), false, srv_env, true, log_inv_env_setting, log_bad_env_command);
-        } catch (const std::system_error &se) {
-            report_service_description_err(name, std::string("could not load environment file: ") + se.what());
+            read_env_file_inline(settings.env_file.c_str(), env_resolve_fd.get(), false, srv_env, true,
+                    log_inv_env_setting, log_bad_env_command);
+        }
+        catch (const std::system_error &se) {
+            report_service_description_err(name, std::string("could not load environment file: ")
+                    + se.what());
         }
     }
 
     renvmap = srv_env.build(menv);
 
-    settings.finalise(report_err, nullptr, report_err, resolve_var);
+    settings.finalise(report_err, nullptr, report_lint, resolve_var);
 
     if (!settings.working_dir.empty()) {
         service_wdir = settings.working_dir;
@@ -772,10 +726,10 @@ service_record *load_service(service_set_t &services, const std::string &name,
 #else
     oflags |= O_RDONLY;
 #endif
-    dirfd = open(service_wdir.c_str(), oflags);
+    int dirfd = open(service_wdir.c_str(), oflags);
     if (dirfd < 0) {
         report_service_description_err(name,
-                std::string("could not open service working directory: ") + strerror(errno));
+                std::string("warning: could not open service working directory: ") + strerror(errno));
         dirfd = AT_FDCWD;
     }
 
@@ -783,21 +737,22 @@ service_record *load_service(service_set_t &services, const std::string &name,
         struct stat command_stat;
         if (command[0] != '/') {
             report_service_description_err(name,
-                    std::string("executable '") + command + "' is not an absolute path");
+                    std::string("warning: ") + setting_name + " executable '" + command
+                            + "' is not an absolute path");
         }
         else if (fstatat(dirfd, command, &command_stat, 0) == -1) {
             report_service_description_err(name,
-                    std::string("could not stat ") + setting_name + " executable '" + command
-                    + "': " + strerror(errno));
+                    std::string("warning: could not stat ") + setting_name + " executable '" + command
+                            + "': " + strerror(errno));
         }
         else {
             if ((command_stat.st_mode & S_IFMT) != S_IFREG) {
-                report_service_description_err(name, std::string(setting_name) + " executable '"
-                        + command + "' is not a regular file.");
+                report_service_description_err(name, std::string("warning: ") + setting_name
+                        + " executable '" + command + "' is not a regular file.");
             }
             else if ((command_stat.st_mode & S_IXUSR) == 0) {
-                report_service_description_err(name, std::string(setting_name) + " executable '" + command
-                        + "' is not executable by owner.");
+                report_service_description_err(name, std::string("warning: ") + setting_name
+                        + " executable '" + command + "' is not executable by owner.");
             }
         }
     };
@@ -820,11 +775,12 @@ service_record *load_service(service_set_t &services, const std::string &name,
             struct stat logfile_dir_stat;
             if (fstatat(dirfd, logfile_dir.c_str(), &logfile_dir_stat, 0) == -1) {
                 report_service_description_err(name,
-                        std::string("could not access logfile directory '") + logfile_dir + "': " + strerror(errno));
+                        std::string("warning: could not access logfile directory '") + logfile_dir
+                                + "': " + strerror(errno));
             }
             else {
                 if ((logfile_dir_stat.st_mode & S_IFDIR) == 0) {
-                    report_service_description_err(name, std::string("logfile directory '")
+                    report_service_description_err(name, std::string("warning: logfile directory '")
                             + logfile_dir + "' exists but is not a directory.");
                 }
             }

@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <csignal>
 #include <cstring>
+#include <cstdlib>
+
 #include <string>
 #include <iostream>
 #include <exception>
@@ -246,15 +248,41 @@ class subproc_buffer : private cpbuffer<subproc_bufsize>
     }
 };
 
+#if defined(RB_POWER_OFF) || defined(RB_POWEROFF) || defined(RB_POWER_DOWN)
+#define POWER_OFF_SUPPORTED 1
+#define POWER_OFF_IS_DEFAULT 1
+#else
+#define POWER_OFF_SUPPORTED 0
+#define POWER_OFF_IS_DEFAULT 0
+#endif
+
+#if defined(RB_HALT_SYSTEM) || defined(RB_HALT)
+#define HALT_SUPPORTED 1
+#if !POWER_OFF_IS_DEFAULT
+#define HALT_IS_DEFAULT 1
+#else
+#define HALT_IS_DEFAULT 0
+#endif
+#else
+#define HALT_SUPPORTED 0
+#define HALT_IS_DEFAULT 0
+#endif
+
+#if POWER_OFF_IS_DEFAULT || HALT_IS_DEFAULT
+#define REBOOT_IS_DEFAULT 0
+#else
+#define REBOOT_IS_DEFAULT 1
+#endif
+
 static bool reboot_cmd_unsupported(const shutdown_type_t type)
 {
     // weed out unsupported values
     switch (type) {
-#if !defined(RB_HALT_SYSTEM) && !defined(RB_HALT)
+#if !HALT_SUPPORTED
     case shutdown_type_t::HALT:
         return true;
 #endif
-#ifndef RB_POWER_OFF
+#if !POWER_OFF_SUPPORTED
     case shutdown_type_t::POWEROFF:
         return true;
 #endif
@@ -276,7 +304,13 @@ int main(int argc, char **argv)
     bool sys_shutdown = false;
     bool use_passed_cfd = false;
     
-    auto shutdown_type = shutdown_type_t::POWEROFF;
+#if POWER_OFF_IS_DEFAULT
+    shutdown_type_t shutdown_type = shutdown_type_t::POWEROFF;
+#elif HALT_IS_DEFAULT
+    shutdown_type_t shutdown_type = shutdown_type_t::HALT;
+#else
+    shutdown_type_t shutdown_type = shutdown_type_t::REBOOT;
+#endif
 
     const char *execname = base_name(argv[0]);
     if (strcmp(execname, reboot_execname) == 0) {
@@ -315,7 +349,7 @@ int main(int argc, char **argv)
                 use_passed_cfd = true;
             }
             else {
-                cerr << "Unrecognized command-line parameter: " << argv[i] << endl;
+                cerr << "Unrecognized command-line parameter: " << argv[i] << "\n";
                 return 1;
             }
         }
@@ -328,22 +362,33 @@ int main(int argc, char **argv)
     if (show_help) {
         cout << execname << " :   shutdown the system\n"
                 "  --help           : show this help\n"
-                "  -r               : reboot\n"
-                "  -s               : soft-reboot (restart dinit with same boot-time arguments)\n"
-#if defined(RB_HALT_SYSTEM) || defined(RB_HALT)
-                "  -h               : halt system\n"
+#if REBOOT_IS_DEFAULT
+                "  -r               : reboot (default).\n"
+#else
+                "  -r               : reboot.\n"
 #endif
-#ifdef RB_POWER_OFF
-                "  -p               : power down (default)\n"
+                "  -s               : soft-reboot (restart dinit with same boot-time arguments).\n"
+#if HALT_SUPPORTED && HALT_IS_DEFAULT
+                "  -h               : halt system (default).\n"
+#elif HALT_SUPPORTED
+                "  -h               : halt system.\n"
+#else
+                "  -h               : halt (not supported on this system).\n"
 #endif
-#ifdef RB_KEXEC
-                "  -k               : stop dinit and reboot directly into kernel loaded with kexec\n"
+#if POWER_OFF_SUPPORTED
+                "  -p               : power down (default).\n"
+#else
+                "  -p               : power down (not supported on this system).\n"
+#endif
+#if defined(RB_KEXEC)
+                "  -k               : execute kernel loaded via kexec.\n"
+#else
+                "  -k               : execute new kernel (not supported on this system).\n"
 #endif
                 "  --use-passed-cfd : use the socket file descriptor identified by the DINIT_CS_FD\n"
                 "                     environment variable to communicate with the init daemon.\n"
                 "  --system         : perform shutdown immediately, instead of issuing shutdown\n"
-                "                     command to the init program. Not recommended for use\n"
-                "                     by users.\n";
+                "                     command to the init program. Not recommended for normal use.\n";
         return 1;
     }
     
@@ -410,24 +455,24 @@ int main(int argc, char **argv)
         wait_for_reply(rbuffer, socknum);
         
         if (rbuffer[0] != (dinit_cptypes::cp_rply_t)cp_rply::ACK) {
-            cerr << "shutdown: control socket protocol error" << endl;
+            cerr << "shutdown: control socket protocol error\n";
             return 1;
         }
     }
     catch (cp_old_client_exception &e) {
-        std::cerr << "shutdown: too old (server reports newer protocol version)" << std::endl;
+        std::cerr << "shutdown: too old (server reports newer protocol version)\n";
         return 1;
     }
     catch (cp_old_server_exception &e) {
-        std::cerr << "shutdown: server too old or protocol error" << std::endl;
+        std::cerr << "shutdown: server too old or protocol error\n";
         return 1;
     }
     catch (cp_read_exception &e) {
-        cerr << "shutdown: control socket read failure or protocol error" << endl;
+        cerr << "shutdown: control socket read failure or protocol error\n";
         return 1;
     }
     catch (cp_write_exception &e) {
-        cerr << "shutdown: control socket write error: " << std::strerror(e.errcode) << endl;
+        cerr << "shutdown: control socket write error: " << std::strerror(e.errcode) << "\n";
         return 1;
     }
 
@@ -448,6 +493,7 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
     sigfillset(&allsigs);
     sigprocmask(SIG_SETMASK, &allsigs, nullptr);
     
+    bool soft_reboot = false;
     int reboot_type = RB_AUTOBOOT; // reboot
     const char *shutdown_type_arg = "reboot";
 #if defined(RB_POWER_OFF)
@@ -484,6 +530,10 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
 #if defined(RB_KEXEC)
     if (shutdown_type == shutdown_type_t::KEXEC) reboot_type = RB_KEXEC;
 #endif
+    if (shutdown_type == shutdown_type_t::SOFTREBOOT) {
+        shutdown_type_arg = "soft";
+        soft_reboot = true;
+    }
     
     // Write to console rather than any terminal, since we lose the terminal it seems:
     int consfd = open("/dev/console", O_WRONLY);
@@ -513,7 +563,7 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
 
     do {
       loop.run();
-    } while (! timeout_reached);
+    } while (!timeout_reached);
 
     kill(-1, SIGKILL);
 
@@ -557,6 +607,11 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
 
     sync();
     
+    if (soft_reboot) {
+        // For a soft reboot we are not PID 1; init is still running, and waiting for us.
+        exit(0);
+    }
+
     sub_buf.append("Issuing shutdown via kernel...\n");
     loop.poll();  // give message a chance to get to console
 #ifdef __NetBSD__
@@ -571,6 +626,9 @@ void do_system_shutdown(shutdown_type_t shutdown_type)
                     "\nIt is possible that no suitable kernel image was loaded before"
                     "\nreboot with kexec was attempted.\n"
             );
+        }
+        else {
+            sub_buf.append("\n");
         }
         while (true) loop.run();
     }
@@ -715,10 +773,12 @@ static loop_t::child_proc_watcher::proc_status_t run_process(const char * prog_a
 static void unmount_disks(loop_t &loop, subproc_buffer &sub_buf)
 {
     try {
-#ifdef __NetBSD__
+#if __NetBSD__
         const char * unmount_args[] = { "/sbin/umount", "-a", nullptr };
-#else
+#elif __linux__
         const char * unmount_args[] = { "/bin/umount", "-a", "-r", nullptr };
+#else
+#error "Unmount command not known for this system"
 #endif
         run_process(unmount_args, loop, sub_buf);
     }
@@ -732,10 +792,12 @@ static void unmount_disks(loop_t &loop, subproc_buffer &sub_buf)
 static void swap_off(loop_t &loop, subproc_buffer &sub_buf)
 {
     try {
-#ifdef __NetBSD__
+#if __NetBSD__
         const char * swapoff_args[] = { "/sbin/swapctl", "-U", nullptr };
-#else
+#elif __linux__
         const char * swapoff_args[] = { "/sbin/swapoff", "-a", nullptr };
+#else
+#error "Swap-off command not known for this system"
 #endif
         run_process(swapoff_args, loop, sub_buf);
     }

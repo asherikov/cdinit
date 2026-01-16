@@ -36,13 +36,17 @@ include_directories(
 
 add_executable(cdinitctl
     dinit/src/dinitctl.cc
+    dinit/src/dinit-client.cc
+    dinit/src/dinit-iostream.cc
     dinit/src/options-processing.cc
     dinit/src/settings.cc
     ${DINIT_CONFIG_HEADER}
 )
 
 add_executable(cdinitcheck
-    dinit/src/dinitcheck.cc
+    dinit/src/dinit-check.cc
+    dinit/src/dinit-client.cc
+    dinit/src/dinit-iostream.cc
     dinit/src/options-processing.cc
     dinit/src/settings.cc
     ${DINIT_CONFIG_HEADER}
@@ -55,6 +59,8 @@ add_executable(cdinitmonitor
 
 add_executable(cdinit
     dinit/src/dinit.cc
+    dinit/src/dinit-client.cc
+    dinit/src/dinit-iostream.cc
     dinit/src/load-service.cc
     dinit/src/service.cc
     dinit/src/proc-service.cc
@@ -91,7 +97,7 @@ install(PROGRAMS
     DESTINATION bin
 )
 
-foreach(DIR cdinit_services)
+foreach(DIR cdinit)
     install(DIRECTORY ${DIR}
         DESTINATION share/${PROJECT_NAME}/
         USE_SOURCE_PERMISSIONS

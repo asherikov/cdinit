@@ -18,26 +18,26 @@ echo()
 # Output a line of information, may be followed by call to sub_info to provide additional information
 info()
 {
-    echo "$*"
+    echo "$1"
 }
 
 # Output additional information (intended to follow call to info)
 sub_info()
 {
-    echo "  ... $*"
+    echo "  ... $1"
 }
 
-# Output an error message, may be followed by a call to sub_error to provide additional information
-error()
+# Output additional error information, and exit (intended to follow call to info)
+sub_info_error()
 {
-    >&2 echo "Error: $*"
+    >&2 echo "  ... Error: $1"
     exit 1
 }
 
-# Output additional error information (intended to follow call to error)
-sub_error()
+# Output an error message, and exit
+error()
 {
-    >&2 echo "  ... Error: $*"
+    >&2 echo "Error: $1"
     exit 1
 }
 
@@ -45,10 +45,8 @@ sub_error()
 # $1: Info, $2: Extra info (optional)
 warning()
 {
-    >&2 echo
     >&2 echo "Warning: $1"
-    [ -n "${2:-}" ] && >&2 echo "  ... $2"
-    >&2 echo
+    [ -z "${2:-}" ] || >&2 echo "  ... $2"
 }
 
 # Produce (as output) a random number from 0-65535
@@ -70,51 +68,81 @@ mktmpdir()
     echo "$dirname"    
 }
 
-# Check whether the compiler ($CXX) seems to work
+# Check whether the specified compiler ($1) seems to work
 cxx_works()
 {
-    info Checking whether \""$1"\" is a working C++ compiler...
-    if $CXX -o "$configtmpdir"/testfile "$configtmpdir"/testfile.cc; then
+    info "Checking whether \"$1\" is a working C++ compiler..."
+    if eval $1 -o '"$configtmpdir"/testfile' '"$configtmpdir"/testfile.cc'; then
         rm -f "$configtmpdir"/testfile
-        sub_info Yes.
+        sub_info "Yes."
     else
         rm -f "$configtmpdir"/testfile*
-        sub_error It seems like \""$CXX"\" is not working a working C++ compiler. Please specify compiler.
+        sub_info_error "It seems that \"$1\" is not a working C++ compiler. Please specify a compiler."
     fi
 }
 
+# Test if the compiler successfully compiles the specified source file. If the optional compilation
+# argument is specified ($3) then pass it to the compiler along with the already-established
+# arguments (this can be used to test if the compiler accepts the argument).
+#
+# If successful, the compiled object file is left in place (at "$configtmpdir/$2").
+#
+#   $1 - the name of the source file to compile
+#   $2 - the name of the result object file
+#   $3 - the argument to test (optional)
+#   CXX - the name of the compiler
+#   CXXFLAGS, CXXFLAGS_EXTRA - any predetermined flags
+try_compile_source()
+{
+    if ! eval $CXX $CXXFLAGS ${3:-} $CXXFLAGS_EXTRA '"$configtmpdir"/"$1"' \
+            -c -o '"$configtmpdir"/"$2"' > /dev/null 2>&1; then
+        # Clean up any output, i.e. don't leave potentially broken object file
+        rm -f "$configtmpdir"/"$2"
+        return 1
+    fi
+    return 0
+}
+
+# Test if the specified object file can be linked into an executable. If the optional link argument
+# is specified ($3) then pass it to the compiler driver along with the already-established
+# arguments (this can be used to test if the compiler driver accepts the argument).
+#
+# If successful, the resulting executable is left in place (at "$configtmpdir/$2").
+#
+#   $1 - the name of the object file to link
+#   $2 - the name of the result executable file
+#   $3 - the argument to test (optional)
+#   CXX - the name of the compiler
+#   LDFLAGS, LDFLAGS_EXTRA - any predetermined flags
+try_link_object()
+{
+    eval $CXX $LDFLAGS $LDFLAGS_EXTRA ${3:-} '"$configtmpdir"/"$1"' \
+            -o '"$configtmpdir"/"$2"' > /dev/null 2>&1
+}
+
 # Test if the compiler accepts an argument (for compilation only); if so add it to named variable.
-# Note: this function will return failure if the flag is unsupported (use try_optional_cxx_argument
-# instead, to avoid errorring out).
 #   $1 - the name of the variable to potentially add the argument to
 #   $2 - the argument to test/add
+#   $3 - either "MANDATORY" or empty/not set; if MANDATORY, this function returns failure if the
+#        argument isn't supported by the compiler. 
 #   CXX - the name of the compiler
 #   CXXFLAGS, CXXFLAGS_EXTRA, LDFLAGS, LDFLAGS_EXTRA - any predetermined flags
-try_cxx_argument()
+check_cxx_argument()
 {
-    info Checking whether "$2" is accepted for compilation...
-    if $CXX $CXXFLAGS $2 $CXXFLAGS_EXTRA $LDFLAGS $LDFLAGS_EXTRA "$configtmpdir"/testfile.cc \
-            -c -o "$configtmpdir"/testfile.o > /dev/null 2>&1; then
+    info "Checking whether \"$2\" is accepted by the compiler..."
+    if try_compile_source testfile.cc testfile.o "$2"; then
         rm "$configtmpdir"/testfile.o
-        sub_info Yes.
+        sub_info "Yes."
         eval "$1=\"\${$1} \$2\""
         eval "$1=\${$1# }"
         return 0
     else
-        sub_info No.
-        return 1
+        sub_info "No."
+        if [ "${3:-}" = MANDATORY ]; then
+            return 1
+        fi
+        return 0
     fi
-}
-
-# Test if the compiler accepts an argument; same as try_cxx_argument, but doesn't return failure
-# if the flag is unsupported.
-#   $1 - the name of the variable to potentially add the argument to
-#   $2 - the argument to test/add
-#   CXX - the name of the compiler
-#   CXXFLAGS, CXXFLAGS_EXTRA, LDFLAGS, LDFLAGS_EXTRA - any predetermined flags
-try_optional_cxx_argument()
-{
-    try_cxx_argument "$1" "$2" || :
 }
 
 # Test if an argument is supported during linking.
@@ -122,48 +150,123 @@ try_optional_cxx_argument()
 #   $2 - the argument to test/add
 #   CXX - the name of the compiler
 #   CXXFLAGS, CXXFLAGS_EXTRA, LDFLAGS, LDFLAGS_EXTRA - any predetermined flags
-try_ld_argument()
+check_link_argument()
 {
-    info Checking whether "$2" is accepted as a link-time option...
-    if [ ! -e "$configtmpdir"/testfile.o ]; then
-        # If the object file doesn't exist yet, need to compile
-        if ! $CXX $CXXFLAGS $CXXFLAGS_EXTRA "$configtmpdir"/testfile.cc \
-                -c -o "$configtmpdir"/testfile.o > /dev/null 2>&1; then
-            sub_info "No (compilation failed)."
-            return
-        fi
+    info "Checking whether \"$2\" is accepted as a link-time option..."
+    # Re-compile the test object to ensure it has been compiled with the correct flags.
+    if ! try_compile_source testfile.cc testfile.o; then
+        sub_info "No (compilation failed)."
+        return
     fi
-    if $CXX $LDFLAGS $LDFLAGS_EXTRA $2 "$configtmpdir"/testfile.o \
-            -o "$configtmpdir"/testfile > /dev/null 2>&1; then
-        sub_info Yes.
+    if try_link_object testfile.o testfile "$2"; then
+        sub_info "Yes."
         rm "$configtmpdir"/testfile
         eval "$1=\"\${$1} \$2\""
         eval "$1=\${$1# }"
     else
-        sub_info No.
+        sub_info "No."
     fi
 }
 
 # Test if an argument is supported during both compiling and linking.
-#   $1 - the name of the compiler-flags variable to potentially add the argument to
-#   $2 - the name of the link-flags variable to potentially add the argument to
+#   $1 - the name of the compiler-flags variable to potentially add the argument to, or a
+#           dash ("-") if this is not required
+#   $2 - the name of the link-flags variable to potentially add the argument to, or a dash ("-")
+#           if this is not required
 #   $3 - the argument to test/add
 #   CXX - the name of the compiler
 #   CXXFLAGS, CXXFLAGS_EXTRA, LDFLAGS, LDFLAGS_EXTRA - any predetermined flags
-try_both_argument()
+check_compile_link_argument()
 {
-    info Checking whether "$3" is accepted for compiling and linking...
-    if $CXX $CXXFLAGS $CXXFLAGS_EXTRA $LDFLAGS $LDFLAGS_EXTRA $3 "$configtmpdir"/testfile.cc \
-            -o "$configtmpdir"/testfile > /dev/null 2>&1; then
-        sub_info Yes.
+    info "Checking whether \"$3\" is accepted as an option for both compiling and linking..."
+    if try_compile_source testfile.cc testfile.o "$3" \
+            && try_link_object testfile.o testfile "$3"; then
+        sub_info "Yes."
+        rm "$configtmpdir"/testfile.o
         rm "$configtmpdir"/testfile
-        eval "$1=\"\${$1} \$3\""
-        eval "$1=\${$1# }"
-        eval "$2=\"\${$2} \$3\""
-        eval "$2=\${$2# }"
+        if [ "$1" != "-" ]; then
+            eval "$1=\"\${$1} \$3\""
+            eval "$1=\${$1# }"
+        fi
+        if [ "$2" != "-" ]; then
+            eval "$2=\"\${$2} \$3\""
+            eval "$2=\${$2# }"
+        fi
     else
-        sub_info No.
+        sub_info "No."
     fi
+}
+
+# Test if the specified header is usable.
+#   $1 - the name of the variable to set to 1 or 0 based on header availability
+#   $2 - the header path
+check_header()
+{
+    info "Checking whether header \"$2\" is available..."
+    echo "#include <$2>" > "$configtmpdir/testheader.cc"
+    if try_compile_source testheader.cc testheader.o; then
+        sub_info "Yes."
+        rm "$configtmpdir"/testheader.o
+        eval "$1=1"
+    else
+        sub_info "No."
+        eval "$1=0"
+    fi
+}
+
+# Write the test code for testing exception handling with -fno-rtti
+write_no_rtti_check()
+{
+    cat << _EOF > "$configtmpdir"/no-rtti-check.cc
+#include <string>
+#include <stdexcept>
+
+int main()
+{
+    try {
+        std::stoull("invalid for stoull");
+    }
+    catch (std::invalid_argument &exc) {
+        return 0;
+    }
+
+    return -1;
+}
+_EOF
+}
+
+# Quote a string to preserve its original form after shell evaluation (except that an empty
+# string remains as an empty string).
+quote_for_shell()
+{
+    # The strategy: surround the string with '-quotes. Look for any such quotes embedded in the
+    # string and replace them with the sequence "'\''", i.e. end ', literal-', begin '.
+    result="'"
+    remaining=$1
+    smallest_prefix=${remaining%%\'*}
+    while [ "$smallest_prefix" != "$remaining" ]; do
+        result="$result$smallest_prefix'\''"
+        remaining=${remaining#*\'}
+        smallest_prefix=${remaining%%\'*}
+    done
+    result="$result$remaining'"
+    if [ "$result" = "''" ]; then result=""; fi
+    printf "%s" "$result"
+}
+
+# Quote a string for use in a make file.
+quote_for_make()
+{
+    result=""
+    remaining=$1
+    smallest_prefix=${remaining%%\$*}
+    while [ "$smallest_prefix" != "$remaining" ]; do
+        result="$result$smallest_prefix\$\$"
+        remaining=${remaining#*\$}
+        smallest_prefix=${remaining%%\$*}
+    done
+    result="$result$remaining"
+    printf "%s" "$result"	
 }
 
 usage()
@@ -173,21 +276,22 @@ Usage: $0 [OPTION]...
 
 Generates build configuration for Dinit.
 
-Defaults for the options are specified in brackets.
+Defaults are shown in [brackets].
 
   -h, --help                    This help message.
   -q, --quiet                   Don't print normal messages, just errors.
-  -c, --clear                   Clear mconfig and configure's temporary files.
+  -c, --clear                   Clear previously generated mconfig.
 
 Target options:
-  --platform=PLATFORM           Set the platform manually (for cross compilation)
+  --platform=PLATFORM           Set the platform manually (for cross-compilation)
                                 Note: for all cross-compiles please specify correct CXX and
-                                CXX_FOR_BUILD!
+                                CXX_FOR_BUILD.
 
 Installation directories:
   --prefix=PREFIX               Main installation prefix [/usr]
-  --exec-prefix=EPREFIX         Main executables prefix  [/]
-  --sbindir=SBINDIR             Dinit executables        [EPREFIX/sbin]
+  --exec-prefix=EPREFIX         Main executables prefix  [PREFIX]
+  --bindir=BINDIR               Dinit executables        [EPREFIX/bin]
+  --sbindir=SBINDIR             Dinit system executables [EPREFIX/sbin]
   --mandir=MANDIR               Dinit man-pages location [PREFIX/share/man]
   --syscontrolsocket=SOCKETPATH Dinitctl socket location [/run/dinitctl] on Linux systems
                                                          [/var/run/dinitctl] on other systems
@@ -207,7 +311,7 @@ Build and configuration options:
                                     [Enabled on Linux if libcap available]
   --disable-capabilities            Disable capabilities support
   --enable-ioprio                   Enable support for I/O priority setting (via Linux API)
-                                    [Disabled]
+                                    [Enabled on linux if linux/ioprio.h available]
   --disable-ioprio                  Disable support for I/O priority setting
   --enable-oom-adj                  Enable support for Linux "OOM" score adjustment
                                     [Enabled only on Linux] 
@@ -264,12 +368,11 @@ Build variables:
   TEST_LDFLAGS_BASE             Link flags to use when building test executables, in addition to
                                 LTO-releated options.
   
-  LDFLAGS_LIBCAP                Additional Link flags to link capabilities support (libcap).
+  CPPFLAGS_LIBCAP               Additional compilation flags for capabilities support (libcap). 
+  LDFLAGS_LIBCAP                Additional link flags for capabilities support (libcap).
 
-Note: paths specified via --prefix/--exec-prefix/--sbindir/--mandir, and build variable values,
-must be escaped for use in a makefile and in shell commands. If there are spaces in paths it is
-recommended to prepend a backslash (\) to them.
-For example: ./configure --prefix="/home/my\ home"
+Note: build variable values representing commands or arguments must be suitably quoted for use in
+shell commands (i.e. quoted twice if executing $0 via shell command line).  
 
 See BUILD file for more information.
 _EOF
@@ -279,6 +382,7 @@ _EOF
 ## Don't take values from environment for these variables:
 for var in PREFIX \
            EPREFIX \
+           BINDIR \
            SBINDIR \
            MANDIR \
            SHUTDOWN_PREFIX \
@@ -304,16 +408,17 @@ for arg in "$@"; do
             sub_info() { true; }
             warning() { true; }
         ;;
-        -c|--clear) rm -f test* & rm -f mconfig && exit 0 ;;
-        --platform=*) PLATFORM="${arg#*=}" && shift ;;
-        --prefix=*) PREFIX="${arg#*=}" && shift ;;
-        --exec-prefix=*) EPREFIX="${arg#*=}" && shift;;
-        --sbindir=*) SBINDIR="${arg#*=}" && shift ;;
-        --mandir=*) MANDIR="${arg#*=}" && shift ;;
-        --default-start-timeout=*) DEFAULT_START_TIMEOUT="${arg#*=}" && shift ;;
-        --default-stop-timeout=*) DEFAULT_STOP_TIMEOUT="${arg#*=}" && shift ;;
-        --syscontrolsocket=*) SYSCONTROLSOCKET="${arg#*=}" && shift ;;
-        --shutdown-prefix=*) SHUTDOWN_PREFIX="${arg#*=}" && shift ;;
+        -c|--clear) rm -f mconfig && exit 0 ;;
+        --platform=*) PLATFORM="${arg#*=}" ;;
+        --prefix=*) PREFIX="${arg#*=}" ;;
+        --exec-prefix=*) EPREFIX="${arg#*=}" ;;
+        --bindir=*) BINDIR="${arg#*=}" ;;
+        --sbindir=*) SBINDIR="${arg#*=}" ;;
+        --mandir=*) MANDIR="${arg#*=}" ;;
+        --default-start-timeout=*) DEFAULT_START_TIMEOUT="${arg#*=}" ;;
+        --default-stop-timeout=*) DEFAULT_STOP_TIMEOUT="${arg#*=}" ;;
+        --syscontrolsocket=*) SYSCONTROLSOCKET="${arg#*=}" ;;
+        --shutdown-prefix=*) SHUTDOWN_PREFIX="${arg#*=}" ;;
         --enable-shutdown|--enable-shutdown=yes) BUILD_SHUTDOWN=yes ;;
         --disable-shutdown|--enable-shutdown=no) BUILD_SHUTDOWN=no ;;
         --enable-cgroups|--enable-cgroups=yes) SUPPORT_CGROUPS=1 ;;
@@ -339,16 +444,25 @@ for arg in "$@"; do
         |LDFLAGS_FOR_BUILD=*|CXXFLAGS=*|CXXFLAGS_EXTRA=*|TEST_CXXFLAGS=*\
         |TEST_CXXFLAGS_EXTRA=*|LDFLAGS=*|LDFLAGS_EXTRA=*|TEST_LDFLAGS=*\
         |TEST_LDFLAGS_EXTRA=*|CPPFLAGS=*|LDFLAGS_BASE=*|TEST_LDFLAGS_BASE=*\
-        |LDFLAGS_LIBCAP) eval "${arg%%=*}=\${arg#*=}" ;;
+        |LDFLAGS_LIBCAP=*|CPPFLAGS_LIBCAP=*) eval "${arg%%=*}=\${arg#*=}" ;;
         *=*) warning "Unknown variable: ${arg%%=*}" ;;
         *) warning "Unknown argument: $arg" ;;
     esac
 done
 
+## Check platform is specified for a cross-build
+if [ -n "${CXX_FOR_BUILD:-}" ]; then
+    if [ -z "${PLATFORM:-}" ]; then
+        warning "Platform not specified for cross-build, defaulting to \"unknown\"."
+        PLATFORM=unknown
+    fi
+fi
+
 ## Defaults for variables not specified by user
 : "${PLATFORM:=$(uname)}"
 : "${PREFIX:="/usr"}"
-: "${EPREFIX:="/"}"
+: "${EPREFIX:="$PREFIX"}"
+: "${BINDIR:="${EPREFIX%%/}/bin"}"
 : "${SBINDIR:="${EPREFIX%%/}/sbin"}"
 : "${MANDIR:="${PREFIX%%/}/share/man"}"
 : "${SHUTDOWN_PREFIX:=""}"
@@ -365,7 +479,7 @@ if [ "$PLATFORM" = "Linux" ]; then
     : "${BUILD_SHUTDOWN:="yes"}"
     : "${SUPPORT_CGROUPS:="1"}"
     : "${SUPPORT_CAPABILITIES:="AUTO"}"
-    : "${SUPPORT_IOPRIO:="0"}"    # the required header <linux/ioprio.h> may not be available
+    : "${SUPPORT_IOPRIO:="AUTO"}"
     : "${SUPPORT_OOM_ADJ:="1"}"
     : "${SYSCONTROLSOCKET:="/run/dinitctl"}"
 else
@@ -414,7 +528,7 @@ if [ -z "${TEST_LDFLAGS_BASE+IS_SET}" ]; then
     TEST_LDFLAGS_BASE=""
     AUTO_TEST_LDFLAGS_BASE="true"
 else
-    AUTO_TEST_LDFLAGS=BASE="false"
+    AUTO_TEST_LDFLAGS_BASE="false"
 fi
 if [ -z "${LDFLAGS_LIBCAP+IS_SET}" ]; then
     LDFLAGS_LIBCAP=""
@@ -422,14 +536,21 @@ if [ -z "${LDFLAGS_LIBCAP+IS_SET}" ]; then
 else
     AUTO_LDFLAGS_LIBCAP="false"
 fi
+if [ -z "${CPPFLAGS_LIBCAP+IS_SET}" ]; then
+    CPPFLAGS_LIBCAP=""
+    AUTO_CPPFLAGS_LIBCAP="true"
+else
+    AUTO_CPPFLAGS_LIBCAP="false"
+fi
 
 [ -z "${STRIPOPTS+IS_SET}" ] && STRIPOPTS="-s"
 
 ## Verify PLATFORM value
 case "$PLATFORM" in
-    Linux|FreeBSD|NetBSD|OpenBSD|Darwin) ;;
-    *) warning "$PLATFORM platform is unknown!" \
-        "Known Platforms are: Linux, FreeBSD, NetBSD, OpenBSD, Darwin"
+    # (Allow "unknown" platform as that may be set by cross-build, with warning already triggered) 
+    Linux|FreeBSD|NetBSD|OpenBSD|Darwin|unknown) ;;
+    *) warning "Platform \"$PLATFORM\" is unknown!" \
+        "Known platforms are: Linux, FreeBSD, NetBSD, OpenBSD, Darwin"
     ;;
 esac
 
@@ -439,7 +560,7 @@ echo "int main(int argc, char **argv) { return 0; }" > "$configtmpdir"/testfile.
 
 ## Find and test C++ compiler
 if [ -z "${CXX:-}" ]; then
-    info Checking C++ compiler...
+    info "Checking C++ compiler..."
     for guess in g++ clang++ c++; do
         if type "$guess" > /dev/null 2>&1; then
             CXX="$guess"
@@ -448,7 +569,7 @@ if [ -z "${CXX:-}" ]; then
         fi
     done
     if [ -z "${CXX:-}" ]; then
-       sub_error No C++ compiler found! # Not found
+       sub_info_error "No C++ compiler found!"
     fi
 fi
 cxx_works "$CXX"
@@ -458,55 +579,116 @@ fi
 
 ## Test compiler/linker supported arguments
 if [ "$AUTO_CXXFLAGS" = "true" ]; then
-    if ! try_cxx_argument CXXFLAGS -std=c++11; then
-        sub_error "The C++ compiler ($CXX) doesn't accept '-std=c++11' and may be too old."
+    if ! check_cxx_argument CXXFLAGS -std=c++11 MANDATORY; then
+        sub_info_error "The C++ compiler ($CXX) doesn't accept '-std=c++11' and may be too old."
     fi
     for argument in -Wall \
                     -Os \
                     -fno-plt
     do
-        try_optional_cxx_argument CXXFLAGS $argument
+        check_cxx_argument CXXFLAGS $argument
     done
-    if [ "$PLATFORM" != "Darwin" ]; then
-        try_optional_cxx_argument CXXFLAGS -fno-rtti
+
+    # -fno-rtti is a special case. Clang+libcxxrt is known for generating broken code when
+    # disabling run-time type information with code which uses exceptions; details regarding the
+    # issue can be found here: https://github.com/llvm/llvm-project/issues/66117
+    info "Checking whether \"-fno-rtti\" is accepted by the compiler..."
+    if [ -n "${CXX_FOR_BUILD:-}" ]; then
+        # May not be able to execute the check when cross-compiling.
+        sub_info "Cross-compilation detected. Disabling \"-fno-rtti\" to avoid a compiler bug on some platforms."
+    else
+        write_no_rtti_check
+        if try_compile_source no-rtti-check.cc no-rtti-check.o -fno-rtti; then
+            sub_info "Yes."
+            info "Checking whether \"-fno-rtti\" breaks exceptions..."
+            if try_link_object no-rtti-check.o no-rtti-check && "$configtmpdir"/no-rtti-check; then
+                sub_info "No."
+                CXXFLAGS="$CXXFLAGS -fno-rtti"
+            else
+                sub_info "Yes. Disabling -fno-rtti"
+            fi
+        else
+            sub_info "No."
+        fi
     fi
 fi
 if [ "$AUTO_LDFLAGS" = true ] && [ "$AUTO_CXXFLAGS" = true ]; then
-    DUMMY_LDFLAGS=""
     # -flto must work for both compiling and linking, but we don't want to add it to LDFLAGS as,
     # if LTO is used, CXXFLAGS will always be used alongside LDFLAGS.
-    if try_both_argument CXXFLAGS DUMMY_LDFLAGS -flto; then
+    if check_compile_link_argument CXXFLAGS - -flto; then
         HAS_LTO="true"
     else
         HAS_LTO="false"
     fi
-    unset DUMMY_LDFLAGS
 fi
 if [ "$AUTO_LDFLAGS_BASE" = true ] && [ "$PLATFORM" = FreeBSD ]; then
-    try_ld_argument LDFLAGS_BASE -lrt
+    check_link_argument LDFLAGS_BASE -lrt
 fi
 if [ "$SUPPORT_CAPABILITIES" != 0 ]; then
     if [ "$AUTO_LDFLAGS_LIBCAP" = true ]; then
-        try_ld_argument LDFLAGS_LIBCAP -lcap
-        if [ "$SUPPORT_CAPABILITIES" = AUTO ]; then
-            if [ -z "$LDFLAGS_LIBCAP" ]; then
-                SUPPORT_CAPABILITIES=0
+        FOUND_LIBCAP_VIA_PKGCONFIG=0
+        if [ "$AUTO_CPPFLAGS_LIBCAP" = true ]; then
+            # No settings provided for libcap, try pkg-config before trying defaults
+            if command -v pkg-config > /dev/null 2>&1; then
+                info "Looking for \"libcap\" via pkg-config..."
+                if pkg-config --exists libcap; then
+                    # (Output from pkg-config should already be quoted for use in a shell eval,
+                    #  despite its documentation which suggests otherwise)
+                    LDFLAGS_LIBCAP="$(pkg-config --libs libcap)" &&
+                    CPPFLAGS_LIBCAP="$(pkg-config --cflags libcap)" &&
+                    FOUND_LIBCAP_VIA_PKGCONFIG=1 &&
+                    SUPPORT_CAPABILITIES=1 &&
+                    sub_info "Found." ||
+                    {
+                        LDFLAGS_LIBCAP=""
+                        CPPFLAGS_LIBCAP=""
+                        sub_info "Couldn't determine flags for compiling/linking via pkg-config."
+                    }
+                else
+                    sub_info "Not found, trying defaults."
+                fi
+            fi
+        fi
+    
+        if [ "$FOUND_LIBCAP_VIA_PKGCONFIG" = 0 ]; then
+            check_link_argument LDFLAGS_LIBCAP -lcap
+            if [ "$SUPPORT_CAPABILITIES" = AUTO ]; then
+                if [ -z "$LDFLAGS_LIBCAP" ]; then
+                    SUPPORT_CAPABILITIES=0
+                else
+                    SUPPORT_CAPABILITIES=1
+                fi
             else
-                SUPPORT_CAPABILITIES=1
+                if [ -z "$LDFLAGS_LIBCAP" ]; then
+                    error "Capabilities support enabled, but could not find libcap."
+                fi
             fi
         fi
     else
         # SUPPORT_CAPABILITIES may be set to AUTO, fix that:
         SUPPORT_CAPABILITES=1
     fi
+    if [ "$AUTO_CPPFLAGS_LIBCAP" = true ]; then
+        CPPFLAGS_LIBCAP=""
+    fi
 else
     LDFLAGS_LIBCAP=""
+    CPPFLAGS_LIBCAP=""
 fi
 
+if [ "$SUPPORT_IOPRIO" = "AUTO" ]; then
+    check_header SUPPORT_IOPRIO "linux/ioprio.h"
+fi
+
+# "XXX_MK" variables are for values already quoted for use in makefiles. The following will now be
+# set: TEST_LDFLAGS_BASE_MK, LDFLAGS_MK, TEST_LDFLAGS_MK, TEST_CXXFLAGS_MK. For other build
+# variables, we'll just do the quoting when we write the value to mconfig.
+
 if [ "$AUTO_TEST_LDFLAGS_BASE" = true ]; then
-    TEST_LDFLAGS_BASE="\$(LDFLAGS_BASE)"
+    TEST_LDFLAGS_BASE_MK="\$(LDFLAGS_BASE)"
     established_TEST_LDFLAGS="$LDFLAGS_BASE"
 else
+    TEST_LDFLAGS_BASE_MK="$(quote_for_make "$TEST_LDFLAGS_BASE")"
     established_TEST_LDFLAGS="$TEST_LDFLAGS_BASE"
 fi
 
@@ -514,52 +696,58 @@ fi
 # options, shortly. 
 if [ "$HAS_LTO" = true ]; then
     if [ "$AUTO_LDFLAGS" = true ]; then
-        LDFLAGS="\$(LDFLAGS_BASE) \$(CXXFLAGS)"
+        LDFLAGS_MK="\$(LDFLAGS_BASE) \$(CXXFLAGS)"
+    else
+        LDFLAGS_MK="$(quote_for_make "$LDFLAGS")"
     fi
     if [ "$AUTO_TEST_LDFLAGS" = true ]; then
-        TEST_LDFLAGS="\$(TEST_LDFLAGS_BASE) \$(TEST_CXXFLAGS)"
+        TEST_LDFLAGS_MK="\$(TEST_LDFLAGS_BASE) \$(TEST_CXXFLAGS)"
         established_TEST_LDFLAGS="$established_TEST_LDFLAGS $TEST_CXXFLAGS"
     else
+        TEST_LDFLAGS_MK="$(quote_for_make "$TEST_LDFLAGS")"
         established_TEST_LDFLAGS="$TEST_LDFLAGS"
     fi
 else
     # default LDFLAGS are just $(LDFLAGS_BASE)
     if [ "$AUTO_LDFLAGS" = true ]; then
-        LDFLAGS="\$(LDFLAGS_BASE)"
+        LDFLAGS_MK="\$(LDFLAGS_BASE)"
+    else
+        LDFLAGS_MK="$(quote_for_make "$LDFLAGS")"
     fi
     if [ "$AUTO_TEST_LDFLAGS" = true ]; then
-        TEST_LDFLAGS="\$(TEST_LDFLAGS_BASE)"
+        TEST_LDFLAGS_MK="\$(TEST_LDFLAGS_BASE)"
     else
         established_TEST_LDFLAGS="$TEST_LDFLAGS"
+        TEST_LDFLAGS_MK="$(quote_for_make "$TEST_LDFLAGS")"
     fi
 fi
 
 # Default for test flags (TEST_CXXFLAGS, TEST_LDFLAGS) is to use the build flags
 if [ "$AUTO_TEST_CXXFLAGS" = "true" ]; then
-    TEST_CXXFLAGS="\$(CXXFLAGS)"
+    TEST_CXXFLAGS_MK="\$(CXXFLAGS)"
     established_TEST_CXXFLAGS="$CXXFLAGS"
 else
+    TEST_CXXFLAGS_MK=$(quote_for_make "$TEST_CXXFLAGS")
     established_TEST_CXXFLAGS="$TEST_CXXFLAGS"
 fi
 
 # Check whether sanitizers can be used for tests
 if [ "$AUTO_TEST_LDFLAGS" = "true" ] && [ "$AUTO_TEST_CXXFLAGS" = "true" ]; then
-    DUMMY_LDFLAGS=""
     if [ "$HAS_LTO" = true ]; then
         # Avoid doubling-up sanitizer options
-        LDFLAGS_VAR=DUMMY_LDFLAGS
+        LDFLAGS_VAR=-
     else
-        LDFLAGS_VAR=TEST_LDFLAGS
+        LDFLAGS_VAR=TEST_LDFLAGS_MK
     fi
+    # (Note that we append directly to TEST_CXXFLAGS_MK/TEST_LDFLAGS_MK here)
     CXXFLAGS="$established_TEST_CXXFLAGS" CXXFLAGS_EXTRA="$TEST_CXXFLAGS_EXTRA" \
             LDFLAGS="$established_TEST_LDFLAGS" LDFLAGS_EXTRA="$TEST_LDFLAGS_EXTRA" \
-            try_both_argument TEST_CXXFLAGS $LDFLAGS_VAR -fsanitize=address,undefined
-    unset DUMMY_LDFLAGS
+            check_compile_link_argument TEST_CXXFLAGS_MK $LDFLAGS_VAR -fsanitize=address,undefined
 fi
 
 ## Create mconfig
 rm -r "$configtmpdir"
-info Creating mconfig...
+info "Creating mconfig..."
 cat << _EOF > mconfig
 ## Auto-generated by "$0" for "$PLATFORM"
 # All changes will be lost if "$0" is re-run.
@@ -568,31 +756,33 @@ cat << _EOF > mconfig
 
 # Installation path options.
 
-SBINDIR=$SBINDIR
-MANDIR=$MANDIR
-SYSCONTROLSOCKET=$SYSCONTROLSOCKET
+BINDIR=$(quote_for_make "$(quote_for_shell "$BINDIR")")
+SBINDIR=$(quote_for_make "$(quote_for_shell "$SBINDIR")")
+MANDIR=$(quote_for_make "$(quote_for_shell "$MANDIR")")
+SYSCONTROLSOCKET=$(quote_for_make "$(quote_for_shell "$SYSCONTROLSOCKET")")
 
 # General build options.
 
-CXX=$CXX
-CXXFLAGS=$CXXFLAGS
-CXXFLAGS_EXTRA=$CXXFLAGS_EXTRA
-TEST_CXXFLAGS=$TEST_CXXFLAGS
-TEST_CXXFLAGS_EXTRA=$TEST_CXXFLAGS_EXTRA
-CPPFLAGS=$CPPFLAGS
-LDFLAGS_BASE=$LDFLAGS_BASE
-LDFLAGS=$LDFLAGS
-LDFLAGS_EXTRA=$LDFLAGS_EXTRA
-TEST_LDFLAGS_BASE=$TEST_LDFLAGS_BASE
-TEST_LDFLAGS=$TEST_LDFLAGS
-TEST_LDFLAGS_EXTRA=$TEST_LDFLAGS_EXTRA
-BUILD_SHUTDOWN=$BUILD_SHUTDOWN
-STRIPOPTS=$STRIPOPTS
+CXX=$(quote_for_make "$CXX")
+CXXFLAGS=$(quote_for_make "$CXXFLAGS")
+CXXFLAGS_EXTRA=$(quote_for_make "$CXXFLAGS_EXTRA")
+TEST_CXXFLAGS=$TEST_CXXFLAGS_MK
+TEST_CXXFLAGS_EXTRA=$(quote_for_make "$TEST_CXXFLAGS_EXTRA")
+CPPFLAGS=$(quote_for_make "$CPPFLAGS")
+LDFLAGS_BASE=$(quote_for_make "$LDFLAGS_BASE")
+LDFLAGS=$LDFLAGS_MK
+LDFLAGS_EXTRA=$(quote_for_make "$LDFLAGS_EXTRA")
+TEST_LDFLAGS_BASE=$TEST_LDFLAGS_BASE_MK
+TEST_LDFLAGS=$TEST_LDFLAGS_MK
+TEST_LDFLAGS_EXTRA=$(quote_for_make "$TEST_LDFLAGS_EXTRA")
+STRIPOPTS=$(quote_for_make "$STRIPOPTS")
 
 # Dependencies
-LDFLAGS_LIBCAP=$LDFLAGS_LIBCAP
+CPPFLAGS_LIBCAP=$(quote_for_make "$CPPFLAGS_LIBCAP")
+LDFLAGS_LIBCAP=$(quote_for_make "$LDFLAGS_LIBCAP")
 
 # Feature settings
+BUILD_SHUTDOWN=$BUILD_SHUTDOWN
 SUPPORT_CGROUPS=$SUPPORT_CGROUPS
 USE_INITGROUPS=$USE_INITGROUPS
 SUPPORT_CAPABILITIES=$SUPPORT_CAPABILITIES
@@ -600,7 +790,7 @@ SUPPORT_IOPRIO=$SUPPORT_IOPRIO
 SUPPORT_OOM_ADJ=$SUPPORT_OOM_ADJ
 
 # Optional settings
-SHUTDOWN_PREFIX=${SHUTDOWN_PREFIX:-}
+SHUTDOWN_PREFIX=$(quote_for_make "$(quote_for_shell "${SHUTDOWN_PREFIX:-}")")
 
 # Service defaults
 DEFAULT_AUTO_RESTART=$DEFAULT_AUTO_RESTART
@@ -626,6 +816,6 @@ fi
 if [ -n "${LDFLAGS_FOR_BUILD:-}" ]; then
     echo "LDFLAGS_FOR_BUILD=$LDFLAGS_FOR_BUILD" >> mconfig
 fi
-sub_info done.
-info Done!
+sub_info "done."
+info "Done!"
 exit 0

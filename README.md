@@ -136,7 +136,7 @@ passed to `dinitctl` if provided.
 Service directories
 -------------------
 
-`cdinit.sh` finds directories named `cdinit_services` under
+`cdinit.sh` finds directories named `cdinit/service` under
 `CDINIT_INSTALL_ROOT` and other `ROS`/`ament` paths, and passes them to `dinit`
 when it is started for the first time. Service names should be prefixed by the
 package name in order to avoid collisions.

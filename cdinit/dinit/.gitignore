@@ -4,13 +4,14 @@
 /src/**/*.d
 /src/dinit
 /src/dinitctl
-/src/dinitcheck
+/src/dinit-check
 /src/dinit-monitor
 /src/shutdown
 /src/tests/tests
 /src/tests/proctests
 /src/tests/loadtests
 /src/tests/envtests
+/src/tests/iostreamtests
 /src/tests/cptests/cptests
 /src/tests/cptests/corpus
 /src/tests/cptests/fuzz

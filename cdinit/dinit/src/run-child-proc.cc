@@ -104,14 +104,13 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
     sigfillset(&sigall_set);
     sigprocmask(SIG_SETMASK, &sigall_set, nullptr);
 
-    constexpr int bufsz = 11 + ((CHAR_BIT * sizeof(pid_t) + 2) / 3) + 1;
-    // "LISTEN_PID=" - 11 characters; the expression above gives a conservative estimate
-    // on the maxiumum number of bytes required for LISTEN=nnn, including nul terminator,
-    // where nnn is a pid_t in decimal (i.e. one decimal digit is worth just over 3 bits).
+    constexpr int bufsz = 11 + type_max_num_digits<pid_t>() + 1;
+    // "LISTEN_PID=" - 11 characters; the expression above calculates the maximum number of bytes
+    // required for LISTEN_PID=nnn, including nul terminator, where nnn is a pid_t in decimal
     char nbuf[bufsz];
 
-    // "DINIT_CS_FD=" - 12 bytes. (we -1 from sizeof(int) in account of sign bit).
-    constexpr int csenvbufsz = 12 + ((CHAR_BIT * sizeof(int) - 1 + 2) / 3) + 1;
+    // "DINIT_CS_FD=" - 12 bytes.
+    constexpr int csenvbufsz = 12 + type_max_num_digits<int>() + 1;
     char csenvbuf[csenvbufsz];
 
     environment::env_map proc_env_map;
@@ -180,10 +179,10 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
             // We need to do an allocation: the variable name length, '=', and space for the value,
             // and nul terminator:
             int notify_var_len = strlen(notify_var);
-            int req_sz = notify_var_len + ((CHAR_BIT * sizeof(int) - 1 + 2) / 3) + 1;
-            char * var_str = (char *) malloc(req_sz);
+            int req_sz = notify_var_len + 1 /* '=' */ + type_max_num_digits<int>() + 1 /* '\0' */;
+            char *var_str = (char *)malloc(req_sz);
             if (var_str == nullptr) goto failure_out;
-            snprintf(var_str, req_sz, "%s=%d", notify_var, notify_fd);
+            buf_print(var_str, notify_var, '=', notify_fd);
             service_env.set_var(var_str);
         }
 
@@ -196,13 +195,13 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
             if (socket_fd != 3) close(socket_fd);
 
             service_env.set_var("LISTEN_FDS=1");
-            snprintf(nbuf, bufsz, "LISTEN_PID=%jd", static_cast<intmax_t>(getpid()));
+            buf_print(nbuf, "LISTEN_PID=", getpid());
             service_env.set_var(nbuf);
         }
 
         if (csfd != -1) {
             err.stage = exec_stage::SETUP_CONTROL_SOCKET;
-            snprintf(csenvbuf, csenvbufsz, "DINIT_CS_FD=%d", csfd);
+            buf_print(csenvbuf, "DINIT_CS_FD=", csfd);
             service_env.set_var(csenvbuf);
         }
 
@@ -237,7 +236,7 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
         // Either: notify_fd == 0, i.e. the notification fd is STDIN (bad form, but we'll allow it)
         //         and in that case it's already open
         //     or: params.input_fd != 1, i.e. our STDIN is already open
-        //     or: we most open STDIN ourself (from /dev/null)
+        //     or: we must open STDIN ourself (from /dev/null)
         if (notify_fd != 0 && params.input_fd == -1 && move_fd(open("/dev/null", O_RDONLY), 0) != 0) {
             goto failure_out;
         }
@@ -324,15 +323,18 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
         #endif
         if (setpriority(PRIO_PROCESS, getpid(), nice) != 0) goto failure_out;
         #ifdef __linux__
-        // we usually create a new session leader; that makes nice not very
-        // useful as the Linux kernel will autogroup processes by session id
-        // except when disabled - so also work around this where enabled
-        // the r+ is used in order to avoid creating it where already disabled
-        errno = 0;
-        FILE *ag = std::fopen("/proc/self/autogroup", "r+");
-        if (ag) {
-            std::fprintf(ag, "%d\n", nice);
-            std::fclose(ag);
+        // We usually create a new session leader (via setsid(), above). If automatic grouping of
+        // tasks on a session basis is enabled in the kernel, the nice value will not affect the
+        // scheduling relative to other processes in the system; in that case we'll also set the
+        // nice value of the group, by writing to /proc/self/autogroup (if it doesn't exist, we
+        // assume automatic grouping is disabled).
+        int ag_fd = open("/proc/self/autogroup", O_WRONLY);
+        if (ag_fd != -1) {
+            char nice_out_buf[type_max_num_digits<int>() + 2]; // +1 sign, +1 newline
+            char *end_ptr = to_dec_digits(nice_out_buf, nice);
+            *end_ptr++ = '\n';
+            if (write(ag_fd, nice_out_buf, end_ptr - nice_out_buf) == -1) goto failure_out;
+            if (close(ag_fd) == -1) goto failure_out;
         }
         else if (errno != ENOENT) goto failure_out;
         #endif
@@ -353,9 +355,9 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
         errno = 0;
         int fd = open("/proc/self/oom_score_adj", O_WRONLY);
         if (fd < 0) goto failure_out;
-        // +4: round up, minus sign, newline, nul terminator
-        char val_str[std::numeric_limits<short>::digits10 + 4];
-        int num_chars = snprintf(val_str, sizeof(val_str), "%hd\n", oom_adj);
+        // +3: minus sign, newline, nul terminator
+        char val_str[type_max_num_digits<short>() + 3];
+        int num_chars = buf_print(val_str, oom_adj, '\n') - val_str;
         if (write(fd, val_str, num_chars) < 0) {
             close(fd);
             goto failure_out;
@@ -398,20 +400,8 @@ void base_process_service::run_child_proc(run_proc_params params) noexcept
         close(cgroup_dir_fd);
 
         // We need to write our own pid into the cgroup.procs file
-        char pidbuf[std::numeric_limits<pid_t>::digits10 + 3];
-        // +1 for most significant digit, +1 for '\n', +1 for nul terminator
-        int num_chars;
-        if (sizeof(pid_t) <= sizeof(unsigned)) {
-            num_chars = sprintf(pidbuf, "%u\n", (unsigned)getpid());
-        }
-        else if (sizeof(pid_t) <= sizeof(unsigned long)) {
-            num_chars = sprintf(pidbuf, "%lu\n", (unsigned long)getpid());
-        }
-        else {
-            static_assert(sizeof(pid_t) <= sizeof(unsigned long long), "pid_t is too big");
-            num_chars = sprintf(pidbuf, "%llu\n", (unsigned long long)getpid());
-        }
-
+        char pidbuf[type_max_num_digits<pid_t>() + 2]; // +1 for '\n', +1 for nul terminator
+        int num_chars = to_dec_digits(pidbuf, get_pid()) - pidbuf;
         if (write(cgroup_procs_fd, pidbuf, num_chars) == -1) goto failure_out;
         close(cgroup_procs_fd);
     }

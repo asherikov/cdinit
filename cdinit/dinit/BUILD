@@ -36,17 +36,28 @@ this file by hand, before proceeding with the build. Note that the the generated
 a symbolic link to a system-specific default config file. It is not necessary to edit the file; you
 can override variables on the "make" command line if you prefer.
 
-An alternative to "make mconfig" is to use the provided "configure" script. It will try to
-generate a suitable "mconfig" file, based on sensible defaults and options provided on the command
-line when the script is run.
+An alternative to "make mconfig" is to use the provided "configure" script. See "'configure'
+script", below.
+
+You can also create and edit the "mconfig" file completely by hand (or start by copying one for a
+particular OS from the "configs" directory) to choose appropriate values for the configuration
+variables defined within.
+
+
+"configure" script
+=-=-=-=-=-=-=-=-=-
+
+The provided "configure" script can be used to generate a suitable "mconfig" file, based on
+sensible defaults and any options provided on the command line when the script is run. It also has
+checks to enable/disable certain features based on the availability of their requirements (such as
+presence of certain header files or libraries).
 
 For more information on available options from the configure script, run:
 
     ./configure --help
 
-You can also create and edit the "mconfig" file completely by hand (or start by copying one for a
-particular OS from the "configs" directory) to choose appropriate values for the configuration
-variables defined within.
+If cross-compiling and using "configure", see the section "Cross-compilation with 'configure'
+script" below.
 
 
 Main build variables
@@ -55,7 +66,9 @@ Main build variables
 There are some build variables that may typically require adjustment. In particular, some
 variables control installation paths or paths that are used at runtime; they are:
 
-  SBINDIR  : set to the directory where the executable files should be installed
+  BINDIR   : set to the directory where the executable files should be installed  
+  SBINDIR  : set to the directory where the "system" executable files should be installed (i.e.
+             shutdown and aliases will be installed here, if built).
   MANDIR   : set to the directory where manual pages should be installed 
   SYSCONTROLSOCKET : set to the default location of the control socket when Dinit is run as a system
                      manager (as opposed to a user service manager)
@@ -81,7 +94,9 @@ The following variables affect compilation and link options:
              (FreeBSD requires -lrt; link time optimisation requires -flto and other flags).
   TEST_CXXFLAGS : are options passed to the compiler when compiling code for tests
   TEST_LDFLAGS  : are options to be used when linking test code
-  LDFLAGS_LIBCAP : addition link options required to link with "libcap" (needed if capabilities
+  CPPFLAGS_LIBCAP : additional compiler options to include "libcap" headers on the header search
+                    path (not normally necessary).
+  LDFLAGS_LIBCAP : additional link options required to link with "libcap" (needed if capabilities
                    support is enabled).
 
 For convenience, generated configuration also allows setting the following:
@@ -100,7 +115,7 @@ specifically include the compilation options as they will be included in LDFLAGS
 
 For cross-compilation, the following can be specified:
 
-  CXX_FOR_BUILD : C++ compiler for compiling code to run on the build host
+  CXX_FOR_BUILD       : C++ compiler for code to run on the build host (i.e. non-cross compiler)
   CXXFLAGS_FOR_BUILD  : any options for compiling code to run on the build host
   CPPFLAGS_FOR_BUILD  : any preprocessor options for code to run on the build host
   LDFLAGS_FOR_BUILD   : any options for linking code to run on the build host
@@ -135,19 +150,40 @@ Recommended compiler options
 
 Dinit should generally build fine with no additional options, other than:
  -std=c++11 :  may be required to select correct C++ standard.
- -D_GLIBCXX_USE_CXX11_ABI=1 :   see "Special note for GCC/Libstdc++", below. Not needed for
-                                most modern systems.
 
 Recommended options, supported by at least GCC and Clang, are:
  -Os       : optimise for size
- -fno-rtti : disable RTTI (run-time type information), it is not required by Dinit. However, on
-             some platforms such as Mac OS (and historically FreeBSD, IIRC), this prevents
-             exceptions working correctly.
+ -fno-rtti : disable generation of RTTI (run-time type information) for types for which it should
+             not be required by the runtime (i.e. for types not thrown/caught as exceptions).
+             Dinit does not require RTTI other than for exceptions, and this option reduces the
+             size of binaries slightly. However, it is not always safe to use this option; see
+             "Special note for the Clang compiler and the Libcxxrt/Libcxxabi runtime".
  -fno-plt  : enables better code generation for non-static builds, but may cause unit test
              failures on some older versions of FreeBSD (eg 11.2-RELEASE-p4 with clang++ 6.0.0).
  -flto     : perform link-time optimisation (option required at compile and link).
 
 Consult compiler documentation for further information on the above options.
+
+
+Cross-compilation with "configure" script
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+If cross-compiling (i.e. specifying the CXX_FOR_BUILD variable), there are some additional
+considerations regarding use of the "configure" script.  
+
+Unless compiler arguments to use are specified when "configure" is invoked, the script will check
+for compiler support of certain options (and enable compilation with these options, if they are
+available). One such check is for compiler support for the "-fno-rtti" compiler option (see
+"Recommended compiler options", above). Unlike checks for other options, this check involves
+compiling a test program and running it to ensure that the option works correctly, because it is
+known not to do so in some cases (see "Special note for the Clang compiler and the Libcxxrt C++
+runtime", below, for details). However, when cross-compiling, because of the inability to run the
+test program on the target machine, this check cannot be performed. In this case, "configure"
+disables use of "-fno-rtti" and outputs this warning:
+
+    Cross-compilation detected. Disabling -fno-rtti to avoid a compiler bug on some platforms.
+
+With the option disabled, the generated binaries will be slightly larger.
 
 
 Other configuration variables
@@ -255,40 +291,18 @@ Note that if you specify installation paths via variables on the "make" command 
 specify the same values for both build and install steps.  
 
 
-Special note for GCC/Libstdc++
-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+Special note for the Clang compiler and the Libcxxrt/Libcxxabi runtime
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-(Note: the issue discussed here has apparently been resolved in recent GCC versions, with the fix
-backported to GCC 6.x series and newer).
+Clang when used as a compiler together with the Libcxxrt or Libcxxabi C++ runtime library on
+certain platforms has an issue that prevents exceptions from working properly in particular cases
+when the "-fno-rtti" compiler option (see "Recommended compiler options") is used. This issue
+can prevent Dinit from working correctly. The known platforms exhibiting this problem are FreeBSD,
+OpenBSD and macOS; it may affect other *BSD variants using Clang, but this hasn't been verified.
 
-GCC 5.x onwards includes a "dual ABI" in its standard library implementation, aka Libstdc++.
-Compiling against the newer (C++11 and later) ABI can be achieved by adding
--D_GLIBCXX_USE_CXX11_ABI=1 to the compiler command line; this uses a non-standard language
-extension to differently mangle symbol names in order to link against the new ABI versions.
+Some details regarding the issue can be found here:
 
-(Some systems may be configured to build with the new ABI by default, and in that case you build
-against the old ABI using -D_GLIBCXX_USE_CXX11_ABI=0).
+    https://github.com/llvm/llvm-project/issues/66117
 
-This is problematic for several reasons. First, it prevents linking against the new ABI with other
-compilers that do not understand the language extension (LLVM i.e. clang++ does so in recent
-versions, so this is perhaps no longer much of a problem in practice). Secondly, some aspects of
-library behaviour are ABI-dependent but cannot be changed using the ABI macro; in particular,
-exceptions thrown as a result of failed I/O operations are, in GCC versions 5.x and 6.x, always
-"old ABI" exceptions which cannot be caught by code compiled against the new ABI, and in GCC
-version 7.x they are always "new ABI" exceptions which cannot be caught by code compiled against
-the old ABI. Since the one library object now supposedly houses both ABIs, this means that at
-least one of the two ABIs is always broken.
-
-A blog post describing the dual ABI mechanism can be found here:
-
-    https://developers.redhat.com/blog/2015/02/05/gcc5-and-the-c11-abi/
-
-The bug regarding the issue with catching other-ABI exceptions is here:
-
-    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66145
-
-Since Dinit is affected by this bug, the unfortunate possibility exists to break Dinit by
-upgrading GCC. If you have libstdc++ corresponding to GCC 5.x or 6.x, you *must* build with the
-old ABI, but Dinit will be broken if you upgrade to GCC 7. If you have libstdc++ from GCC 7, you
-*must* build with the new ABI. If the wrong ABI is used, Dinit may still run successfully but any
-attempt to load a non-existing service, for example, will cause Dinit to crash.
+It's recommended not to use the "-fno-rtti" compiler option when building Dinit on the mentioned
+platforms. As a consequence of not using this option, the output binary will be larger.
