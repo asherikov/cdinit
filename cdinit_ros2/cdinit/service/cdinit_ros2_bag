@@ -13,5 +13,4 @@ working-dir = ${CDINIT_SESSION_ROOT}
 
 depends-ms = cdinit_log@cdinit_ros2_bag
 depends-ms = cdinit_sessionsync
-
-#options = shares-console
+depends-ms = cdinit_ros2_main

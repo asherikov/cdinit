@@ -1,0 +1,8 @@
+type = scripted
+command = cdinit.sh setenv \
+    ROS_HOME="${CDINIT_SESSION_ROOT}" \
+    ROS_LOG_DIR="${CDINIT_SESSION_ROOT}/ros_log" \
+    ROS_LOCALHOST_ONLY=1
+
+working-dir = ${CDINIT_SESSION_ROOT}
+
