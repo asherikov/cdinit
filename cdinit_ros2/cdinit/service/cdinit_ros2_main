@@ -6,3 +6,5 @@ command = cdinit.sh setenv \
 
 working-dir = ${CDINIT_SESSION_ROOT}
 
+after = cdinit_execution_profile@simulation
+after = cdinit_execution_profile@deployment

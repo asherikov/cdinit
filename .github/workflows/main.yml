@@ -9,4 +9,3 @@ jobs:
             workspace_version: main
             package_github_repo: ${{ github.repository }}
             package_version: ${{ github.sha }}
-            build_target: cdinit

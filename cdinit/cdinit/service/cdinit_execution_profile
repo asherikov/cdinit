@@ -1,0 +1,6 @@
+type = scripted
+command = cdinit.sh setenv \
+    CDINIT_EXECUTION_PROFILE=$1
+
+working-dir = ${CDINIT_SESSION_ROOT}
+
